@@ -55,10 +55,10 @@ docs:
 	$(GO) run ./cmd/generate-api-docs -spec docs/openapi.json -out "$(API_DOCS_DIR)/index.html" -redoc-version "$(REDOC_VERSION)"
 
 docker-build:
-	docker build --build-arg VERSION="$(VERSION)" -t exitmesh-skills:$(VERSION) .
+	docker build --build-arg VERSION="$(VERSION)" -t exitskills:$(VERSION) .
 
 helm-lint:
-	helm lint deploy/helm/exitmesh-skills --set existingSecret=lint-only
+	helm lint deploy/helm/exitskills --set existingSecret=lint-only
 
 clean:
 	rm -rf bin dist

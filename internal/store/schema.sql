@@ -58,3 +58,9 @@ ALTER TABLE skills ADD COLUMN IF NOT EXISTS quality_score SMALLINT CHECK (qualit
 UPDATE skills SET quality_score = 5 WHERE quality_score IS NULL;
 ALTER TABLE skills ALTER COLUMN quality_score SET NOT NULL;
 ALTER TABLE skills ADD COLUMN IF NOT EXISTS llm_checked BOOLEAN NOT NULL DEFAULT FALSE;
+
+DELETE FROM skills
+WHERE NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(skills.files) AS file
+    WHERE file->>'path' IN ('SKILL.md', 'SKILLS.md')
+);

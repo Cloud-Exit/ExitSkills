@@ -1,24 +1,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "exitmesh-skills.fullname" . }}
+  name: {{ include "exitskills.fullname" . }}
   labels:
-    {{- include "exitmesh-skills.labels" . | nindent 4 }}
+    {{- include "exitskills.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "exitmesh-skills.selectorLabels" . | nindent 6 }}
+      {{- include "exitskills.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "exitmesh-skills.selectorLabels" . | nindent 8 }}
+        {{- include "exitskills.selectorLabels" . | nindent 8 }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "exitmesh-skills.serviceAccountName" . }}
+      serviceAccountName: {{ include "exitskills.serviceAccountName" . }}
       automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -38,19 +38,19 @@ spec:
               protocol: TCP
           env:
             - name: DATABASE_URL
-              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: DATABASE_URL}}
+              valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: DATABASE_URL}}
             - name: GITHUB_TOKEN
-              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: GITHUB_TOKEN, optional: true}}
+              valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: GITHUB_TOKEN, optional: true}}
             - name: GITHUB_CLIENT_ID
-              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: GITHUB_CLIENT_ID, optional: true}}
+              valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: GITHUB_CLIENT_ID, optional: true}}
             - name: GITHUB_CLIENT_SECRET
-              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: GITHUB_CLIENT_SECRET, optional: true}}
+              valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: GITHUB_CLIENT_SECRET, optional: true}}
             - name: ENCRYPTION_KEY
-              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: ENCRYPTION_KEY}}
+              valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: ENCRYPTION_KEY}}
             - name: MASTER_TOKEN
-              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: MASTER_TOKEN}}
+              valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: MASTER_TOKEN}}
             - name: AI_API_KEY
-              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: AI_API_KEY, optional: true}}
+              valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: AI_API_KEY, optional: true}}
             - {name: LISTEN_ADDRESS, value: {{ .Values.config.listenAddress | quote }}}
             - {name: PUBLIC_BASE_URL, value: {{ .Values.config.publicBaseUrl | quote }}}
             - {name: AI_BASE_URL, value: {{ .Values.config.aiBaseUrl | quote }}}

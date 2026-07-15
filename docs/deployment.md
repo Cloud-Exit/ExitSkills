@@ -102,7 +102,7 @@ kubectl -n exitskills create secret generic exitskills-secrets \
 Install the published OCI Helm chart. Pin an explicit SemVer in production:
 
 ```sh
-helm upgrade --install exitskills oci://ghcr.io/cloud-exit/exitmesh-skills \
+helm upgrade --install exitskills oci://ghcr.io/cloud-exit/charts/exitskills \
   --version 0.2.0 \
   --namespace exitskills \
   --set fullnameOverride=exitskills \

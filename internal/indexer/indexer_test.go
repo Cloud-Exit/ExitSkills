@@ -172,6 +172,15 @@ func TestReconcileLogsEveryStoredSkillAssessment(t *testing.T) {
 	}
 }
 
+func TestPrimarySkillContentsRequiresCanonicalFilenameCase(t *testing.T) {
+	if _, ok := primarySkillContents([]model.File{{Path: "skills.md", Contents: "# Documentation"}}); ok {
+		t.Fatal("lowercase documentation file was accepted as a canonical skill file")
+	}
+	if contents, ok := primarySkillContents([]model.File{{Path: "SKILL.md", Contents: "# Actual skill"}}); !ok || contents != "# Actual skill" {
+		t.Fatalf("canonical skill file = %q, %t", contents, ok)
+	}
+}
+
 func TestReconcileRetriesCanceledAssessmentWithoutDeletingSkill(t *testing.T) {
 	store := &fakeStore{unassessed: []model.Skill{{
 		ID: "org/repo/legacy", Source: "org/repo", Slug: "legacy", Name: "Legacy", Stars: 11,

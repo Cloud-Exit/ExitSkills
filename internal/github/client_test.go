@@ -274,6 +274,7 @@ func TestDiscoverIgnoresFilenameNearMatches(t *testing.T) {
 		if r.URL.Query().Get("q") == "filename:SKILLS.md" {
 			items = append(items,
 				map[string]any{"name": "hard-skills.md", "path": "docs/hard-skills.md", "url": server.URL + "/near-match", "repository": map[string]any{"full_name": "acme/docs", "stargazers_count": 20}},
+				map[string]any{"name": "skills.md", "path": "docs/reference/skills.md", "url": server.URL + "/near-match", "repository": map[string]any{"full_name": "acme/reference", "stargazers_count": 20}},
 				map[string]any{"name": "SKILLS.md", "path": "skills/demo/SKILLS.md", "url": server.URL + "/exact", "repository": map[string]any{"full_name": "acme/tool", "stargazers_count": 20}},
 			)
 		}
@@ -443,6 +444,14 @@ func TestMetadataBoundsUntrustedFields(t *testing.T) {
 	}
 	if len(description) != 1000 {
 		t.Fatalf("description length = %d, want 1000", len(description))
+	}
+}
+
+func TestMetadataPrefersSkillFrontmatterOverGenericHeadings(t *testing.T) {
+	contents := "---\nname: wren\ndescription: Semantic SQL for agents\n---\n\n# Wren CLI\n\n## Skills\n"
+	name, description := metadata(contents)
+	if name != "wren" || description != "Semantic SQL for agents" {
+		t.Fatalf("metadata() = %q, %q", name, description)
 	}
 }
 

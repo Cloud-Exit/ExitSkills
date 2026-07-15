@@ -158,6 +158,13 @@ func (s *SQLite) ensureAssessmentColumns(ctx context.Context) error {
 			return fmt.Errorf("add SQLite LLM status: %w", err)
 		}
 	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM skills
+WHERE NOT EXISTS (
+    SELECT 1 FROM json_each(skills.files)
+    WHERE json_extract(value, '$.path') IN ('SKILL.md', 'SKILLS.md')
+)`); err != nil {
+		return fmt.Errorf("remove non-skill SQLite rows: %w", err)
+	}
 	return nil
 }
 

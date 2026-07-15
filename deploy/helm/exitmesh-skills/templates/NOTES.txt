@@ -1,4 +1,0 @@
-Create an API key from the running pod:
-
-  kubectl exec deployment/{{ include "exitmesh-skills.fullname" . }} -- admin --name example --valid-for 720h
-

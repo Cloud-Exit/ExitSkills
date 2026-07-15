@@ -25,4 +25,4 @@ jobs:
       - run: make test-race
       - run: make build
       - uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-      - run: helm lint deploy/helm/exitmesh-skills --set existingSecret=exitmesh-skills
+      - run: helm lint deploy/helm/exitskills --set existingSecret=exitskills

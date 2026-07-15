@@ -127,6 +127,25 @@ func TestSQLiteMigrationAddsAssessmentStateToExistingCatalog(t *testing.T) {
 	}
 }
 
+func TestSQLiteMigrationRemovesRowsWithoutCanonicalSkillFile(t *testing.T) {
+	db := openTestSQLite(t)
+	ctx := context.Background()
+	invalid := testSkill()
+	invalid.ID = "Canner/WrenAI/reference"
+	invalid.Slug = "reference"
+	invalid.Name = "Skills"
+	invalid.Files = []model.File{{Path: "skills.md", Contents: "# Skills documentation"}}
+	if err := db.UpsertSkill(ctx, invalid); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetSkill(ctx, invalid.ID, false); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("invalid documentation row survived migration: %v", err)
+	}
+}
+
 func TestSQLiteSkillRepositoryCompatibility(t *testing.T) {
 	db := openTestSQLite(t)
 	ctx := context.Background()

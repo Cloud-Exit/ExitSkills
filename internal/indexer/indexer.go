@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -237,8 +236,8 @@ func (i *Indexer) Reconcile(ctx context.Context) error {
 
 func primarySkillContents(files []model.File) (string, bool) {
 	for _, file := range files {
-		name := strings.ToUpper(path.Base(file.Path))
-		if name == "SKILL.MD" || name == "SKILLS.MD" {
+		name := path.Base(file.Path)
+		if name == "SKILL.md" || name == "SKILLS.md" {
 			return file.Contents, true
 		}
 	}

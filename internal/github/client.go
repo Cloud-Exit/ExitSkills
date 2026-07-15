@@ -166,7 +166,7 @@ func (c *Client) discover(ctx context.Context, freshIDs map[string]struct{}) ([]
 			candidatesBeforePage := len(candidates)
 			pageItems := make([]searchItem, 0, len(result.Items))
 			for _, item := range result.Items {
-				if !strings.EqualFold(path.Base(item.Path), filename) {
+				if path.Base(item.Path) != filename {
 					filenameMismatches++
 					c.logger.Debug("search result skipped", "repository", item.Repository.FullName, "path", item.Path, "reason", "filename_mismatch", "expected", filename)
 					continue
@@ -411,7 +411,7 @@ func (c *Client) fetchRepositorySkillItems(ctx context.Context, repositories []r
 				items := make([]searchItem, 0)
 				for _, entry := range tree.Tree {
 					name := path.Base(entry.Path)
-					if entry.Type != "blob" || (!strings.EqualFold(name, "SKILL.md") && !strings.EqualFold(name, "SKILLS.md")) {
+					if entry.Type != "blob" || (name != "SKILL.md" && name != "SKILLS.md") {
 						continue
 					}
 					var item searchItem

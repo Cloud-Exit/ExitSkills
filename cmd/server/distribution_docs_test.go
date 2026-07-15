@@ -33,12 +33,13 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"no-new-privileges:true",
 			"POSTGRES_PASSWORD:?set POSTGRES_PASSWORD",
 		},
-		"../../deploy/helm/exitmesh-skills/values.yaml": {
+		"../../deploy/helm/exitskills/values.yaml": {
 			"repository: ghcr.io/cloud-exit/exitskills",
 			"seccompProfile:",
 			"type: RuntimeDefault",
 		},
-		"../../deploy/helm/exitmesh-skills/Chart.yaml": {
+		"../../deploy/helm/exitskills/Chart.yaml": {
+			"name: exitskills",
 			"version: 0.2.0",
 			"appVersion: \"0.2.0\"",
 		},
@@ -62,14 +63,16 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"org.opencontainers.image.source=https://github.com/${{ github.repository }}",
 			"helm registry login",
 			"helm push",
+			"dist/exitskills-${{ steps.version.outputs.version }}.tgz",
 			"oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}",
+			"packages/container/exitmesh-skills",
 		},
 		"../../docs/deployment.md": {
 			"# Running ExitSkills",
 			"docker build",
 			"docker compose",
 			"helm upgrade --install",
-			"oci://ghcr.io/cloud-exit/exitmesh-skills",
+			"oci://ghcr.io/cloud-exit/charts/exitskills",
 			"--version 0.2.0",
 			"--security-opt no-new-privileges",
 			"--cap-drop ALL",
@@ -106,7 +109,7 @@ func TestReleaseUsesSemanticVersions(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"base_version=\"$(awk '$1 == \"version:\" { print $2; exit }' deploy/helm/exitmesh-skills/Chart.yaml)\"",
+		"base_version=\"$(awk '$1 == \"version:\" { print $2; exit }' deploy/helm/exitskills/Chart.yaml)\"",
 		"^[0-9]+\\.[0-9]+\\.[0-9]+$",
 		"tag=v${version}",
 		"git tag --list \"v${release_line}.*\"",

@@ -133,7 +133,7 @@ SQLite database files are created with owner-only (`0600`) permissions.
 Both binaries are placed in `/usr/local/bin` in the image, so `admin` is directly available inside a running pod. The plaintext token is printed once; the database stores an HMAC lookup and an AES-256-GCM ciphertext, never plaintext.
 
 ```sh
-kubectl exec deployment/exitmesh-skills -- \
+kubectl exec deployment/exitskills -- \
   admin --name automation --valid-for 720h
 ```
 
@@ -224,7 +224,7 @@ See the complete [Docker, Docker Compose, and Kubernetes deployment guide](docs/
 
 ## CI and releases
 
-Pull requests and non-main pushes run formatting, vet, race-enabled tests, builds, and Helm linting. Every push to `main` creates the next patch release in the chart's SemVer line (starting at `0.2.0`), publishes versioned and `latest` images to GHCR, publishes the versioned chart to `oci://ghcr.io/cloud-exit/exitmesh-skills`, and creates a `vMAJOR.MINOR.PATCH` GitHub release containing the two binaries and chart archive.
+Pull requests and non-main pushes run formatting, vet, race-enabled tests, builds, and Helm linting. Every push to `main` creates the next patch release in the chart's SemVer line (starting at `0.2.0`), publishes versioned and `latest` images to GHCR, publishes the `exitskills` chart to `oci://ghcr.io/cloud-exit/charts/exitskills`, and creates a `vMAJOR.MINOR.PATCH` GitHub release containing the two binaries and chart archive.
 
 Development follows mandatory TDD. Update this README whenever behavior, setup, configuration, APIs, or operations change.
 
