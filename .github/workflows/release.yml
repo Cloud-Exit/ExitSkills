@@ -8,6 +8,9 @@ permissions:
   contents: write
   packages: write
 
+env:
+  REGISTRY: ghcr.io
+
 concurrency:
   group: release-main
   cancel-in-progress: false
@@ -25,6 +28,7 @@ jobs:
           go-version: 1.26.5
           cache: true
       - uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Choose version
         id: version
         shell: bash
@@ -45,18 +49,33 @@ jobs:
             --app-version "${{ steps.version.outputs.version }}" \
             --destination dist
           cp bin/server bin/admin dist/
-      - name: Publish container image
-        env:
-          REGISTRY: ghcr.io
-          IMAGE: ${{ github.repository }}
-          VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ github.token }}
+      - name: Normalize container image name
+        id: image
+        shell: bash
         run: |
-          echo "$GH_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
-          image="${REGISTRY}/${IMAGE,,}"
-          docker build --build-arg VERSION="$VERSION" -t "$image:$VERSION" -t "$image:latest" .
-          docker push "$image:$VERSION"
-          docker push "$image:latest"
+          image=${REGISTRY}/${GITHUB_REPOSITORY,,}
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish container image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
+            ${{ steps.image.outputs.image }}:latest
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            SOURCE=https://github.com/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

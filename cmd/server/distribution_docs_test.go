@@ -12,6 +12,7 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"alpine:latest",
 			"golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2",
 			"alpine:latest@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+			"org.opencontainers.image.source",
 			"VOLUME [\"/data\"]",
 		},
 		"../../LICENSE": {
@@ -33,6 +34,7 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"POSTGRES_PASSWORD:?set POSTGRES_PASSWORD",
 		},
 		"../../deploy/helm/exitmesh-skills/values.yaml": {
+			"repository: ghcr.io/cloud-exit/exitskills",
 			"seccompProfile:",
 			"type: RuntimeDefault",
 		},
@@ -45,6 +47,15 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
 			"Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310",
 			"persist-credentials: false",
+		},
+		"../../.github/workflows/release.yml": {
+			"docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+			"docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0",
+			"docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+			"image=${REGISTRY}/${GITHUB_REPOSITORY,,}",
+			"steps.image.outputs.image",
+			"push: true",
+			"org.opencontainers.image.source=https://github.com/${{ github.repository }}",
 		},
 		"../../docs/deployment.md": {
 			"# Running ExitSkills",

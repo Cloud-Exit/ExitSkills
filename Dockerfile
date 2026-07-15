@@ -10,6 +10,10 @@ RUN CGO_ENABLED=0 go test ./... && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/admin ./cmd/admin
 
 FROM alpine:latest@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+ARG VERSION=dev
+ARG SOURCE=https://github.com/Cloud-Exit/ExitSkills
+LABEL org.opencontainers.image.source="$SOURCE" \
+      org.opencontainers.image.version="$VERSION"
 RUN addgroup -S -g 10001 app && adduser -S -D -H -u 10001 -G app app && \
     mkdir -p /data && chown 10001:10001 /data
 COPY --from=builder /out/server /usr/local/bin/server

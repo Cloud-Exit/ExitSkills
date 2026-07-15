@@ -106,7 +106,7 @@ helm upgrade --install exitskills deploy/helm/exitmesh-skills \
   --namespace exitskills \
   --set fullnameOverride=exitskills \
   --set existingSecret=exitskills-secrets \
-  --set image.repository=ghcr.io/exitmesh/skills \
+  --set image.repository=ghcr.io/cloud-exit/exitskills \
   --set image.tag=latest
 ```
 

@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/exitmesh/skills
+  repository: ghcr.io/cloud-exit/exitskills
   tag: ""
   pullPolicy: IfNotPresent
 
