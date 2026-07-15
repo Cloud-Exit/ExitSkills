@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ type Config struct {
 	AIBaseURL          string
 	AIAPIKey           string
 	AIModel            string
+	AIEnabled          bool
 	ListenAddress      string
 	PublicBaseURL      string
 	IndexInterval      time.Duration
@@ -43,8 +45,6 @@ func Load() (Config, error) {
 	required := map[string]string{
 		"DATABASE_URL": cfg.DatabaseURL,
 		"MASTER_TOKEN": cfg.MasterToken,
-		"AI_BASE_URL":  cfg.AIBaseURL,
-		"AI_MODEL":     cfg.AIModel,
 	}
 	for name, value := range required {
 		if strings.TrimSpace(value) == "" {
@@ -54,7 +54,60 @@ func Load() (Config, error) {
 	if err := validateGitHubAuthentication(&cfg); err != nil {
 		return Config{}, err
 	}
+	hasAIBaseURL := strings.TrimSpace(cfg.AIBaseURL) != ""
+	hasAIModel := strings.TrimSpace(cfg.AIModel) != ""
+	if hasAIBaseURL != hasAIModel {
+		return Config{}, errors.New("AI_BASE_URL and AI_MODEL must be configured together or both omitted")
+	}
+	cfg.AIEnabled = hasAIBaseURL && hasAIModel
+	localDevelopment, _ := boolEnv("EXITMESH_LOCAL_DEVELOPMENT", false)
+	if !localDevelopment && len(cfg.MasterToken) < 32 {
+		return Config{}, errors.New("MASTER_TOKEN must contain at least 32 bytes outside local development")
+	}
+	urls := map[string]string{
+		"GITHUB_API_BASE_URL": cfg.GitHubAPIBaseURL,
+		"OFFICIAL_SKILLS_URL": cfg.OfficialURL,
+	}
+	if cfg.AIEnabled {
+		urls["AI_BASE_URL"] = cfg.AIBaseURL
+	}
+	for name, value := range urls {
+		if err := validateHTTPURL(name, value, localDevelopment); err != nil {
+			return Config{}, err
+		}
+	}
+	if err := validatePublicURL(cfg.PublicBaseURL); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func validateHTTPURL(name, value string, allowHTTP bool) error {
+	if strings.ContainsAny(value, "?#") {
+		return fmt.Errorf("%s must not contain a query or fragment", name)
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be an absolute URL", name)
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if allowHTTP && parsed.Scheme == "http" {
+		return nil
+	}
+	return fmt.Errorf("%s must use HTTPS outside local development", name)
+}
+
+func validatePublicURL(value string) error {
+	if strings.ContainsAny(value, "?#") {
+		return errors.New("PUBLIC_BASE_URL must not contain a query or fragment")
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return errors.New("PUBLIC_BASE_URL must be an absolute HTTP(S) URL")
+	}
+	return nil
 }
 
 func validateGitHubAuthentication(cfg *Config) error {

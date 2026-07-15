@@ -17,6 +17,8 @@ serviceAccount:
 podAnnotations: {}
 podSecurityContext:
   fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
 securityContext:
   allowPrivilegeEscalation: false
   capabilities:
@@ -39,8 +41,9 @@ resources:
 config:
   listenAddress: ":8080"
   publicBaseUrl: "https://skills.exitmesh.com"
-  aiBaseUrl: "https://api.openai.com/v1"
-  aiModel: "gpt-5-mini"
+  # Set both values to enable the boot-time and indexing LLM gate.
+  aiBaseUrl: ""
+  aiModel: ""
   githubApiBaseUrl: "https://api.github.com"
   officialSkillsUrl: "https://www.skills.sh/official"
   indexInterval: "24h"

@@ -1,7 +1,6 @@
 apiVersion: v2
 name: exitmesh-skills
-description: Security-audited agent skill catalog API for ExitMesh
+description: ExitSkills security-audited agent skill catalog API
 type: application
 version: 0.1.0
 appVersion: "dev"
-

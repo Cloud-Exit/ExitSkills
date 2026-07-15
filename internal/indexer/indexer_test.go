@@ -21,10 +21,22 @@ type fakeSource struct{ candidates []Candidate }
 
 func (f fakeSource) Discover(context.Context) ([]Candidate, error) { return f.candidates, nil }
 
-type fakeAuditor struct{ scores map[string]int }
+type fakeAuditor struct {
+	scores        map[string]int
+	qualityScores map[string]int
+	statuses      map[string]string
+}
 
 func (f fakeAuditor) Audit(_ context.Context, contents string) (audit.Result, error) {
-	return audit.Result{Score: f.scores[contents], Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
+	qualityScore := 8
+	if score, exists := f.qualityScores[contents]; exists {
+		qualityScore = score
+	}
+	status := "pass"
+	if configured, exists := f.statuses[contents]; exists {
+		status = configured
+	}
+	return audit.Result{Score: f.scores[contents], QualityScore: qualityScore, Status: status, Summary: "checked", RiskLevel: "LOW"}, nil
 }
 
 type failingAuditor struct{}
@@ -34,11 +46,12 @@ func (failingAuditor) Audit(context.Context, string) (audit.Result, error) {
 }
 
 type fakeStore struct {
-	mu       sync.Mutex
-	upserted []model.Skill
-	deleted  []string
-	fresh    map[string]struct{}
-	cutoff   time.Time
+	mu         sync.Mutex
+	upserted   []model.Skill
+	deleted    []string
+	fresh      map[string]struct{}
+	unassessed []model.Skill
+	cutoff     time.Time
 }
 
 func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
@@ -78,6 +91,141 @@ func (f *fakeStore) FreshSkillIDs(_ context.Context, cutoff time.Time) (map[stri
 	f.mu.Unlock()
 	return f.fresh, nil
 }
+func (f *fakeStore) UnassessedSkills(context.Context) ([]model.Skill, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.Skill(nil), f.unassessed...), nil
+}
+
+func TestRunPublishesWithoutLLMWhenAssessmentIsDisabled(t *testing.T) {
+	store := &fakeStore{}
+	stats, err := New(fakeSource{candidates: []Candidate{{
+		ID: "org/repo/unchecked", Source: "org/repo", Slug: "unchecked", Name: "Unchecked", Stars: 11, Contents: "unchecked",
+	}}}, nil, store, time.Now).Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Stored != 1 || len(store.upserted) != 1 || store.upserted[0].LLMChecked {
+		t.Fatalf("disabled assessment result: stats=%+v skills=%+v", stats, store.upserted)
+	}
+}
+
+type orderingSource struct {
+	beforeDiscover func() error
+}
+
+func (source orderingSource) Discover(context.Context) ([]Candidate, error) {
+	if err := source.beforeDiscover(); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func TestRunAssessesStoredUncheckedSkillsBeforeGitHubDiscovery(t *testing.T) {
+	store := &fakeStore{unassessed: []model.Skill{{
+		ID: "org/repo/legacy", Source: "org/repo", Slug: "legacy", Name: "Legacy", Stars: 11,
+		Files: []model.File{{Path: "SKILL.md", Contents: "legacy contents"}},
+	}}}
+	auditor := &recordingAuditor{}
+	source := orderingSource{beforeDiscover: func() error {
+		auditor.mu.Lock()
+		defer auditor.mu.Unlock()
+		if !slices.Contains(auditor.calls, "legacy contents") {
+			return errors.New("GitHub discovery started before stored unchecked skill assessment")
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if len(store.upserted) != 1 || !store.upserted[0].LLMChecked {
+			return errors.New("stored unchecked skill was not marked as passed before discovery")
+		}
+		return nil
+	}}
+	if _, err := New(source, auditor, store, time.Now).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileLogsEveryStoredSkillAssessment(t *testing.T) {
+	store := &fakeStore{unassessed: []model.Skill{{
+		ID: "org/repo/legacy", Source: "org/repo", Slug: "legacy", Name: "Legacy", Stars: 11,
+		Files: []model.File{{Path: "SKILL.md", Contents: "legacy contents"}},
+	}}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	index := New(fakeSource{}, &recordingAuditor{}, store, time.Now).WithLogger(logger)
+	if err := index.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	output := logs.String()
+	for _, expected := range []string{
+		`"msg":"stored skill LLM assessment started"`,
+		`"msg":"stored skill LLM assessment passed"`,
+		`"skill_id":"org/repo/legacy"`,
+		`"position":1`,
+		`"total":1`,
+		`"security_score":8`,
+		`"quality_score":8`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("missing %s in reconciliation logs:\n%s", expected, output)
+		}
+	}
+}
+
+func TestReconcileRetriesCanceledAssessmentWithoutDeletingSkill(t *testing.T) {
+	store := &fakeStore{unassessed: []model.Skill{{
+		ID: "org/repo/legacy", Source: "org/repo", Slug: "legacy", Name: "Legacy", Stars: 11,
+		Files: []model.File{{Path: "SKILL.md", Contents: "legacy contents"}},
+	}}}
+	auditor := &cancelOnceAuditor{}
+	index := New(fakeSource{}, auditor, store, time.Now)
+	index.assessmentRetryDelay = 0
+	if err := index.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if auditor.calls.Load() != 2 {
+		t.Fatalf("assessment calls = %d, want 2", auditor.calls.Load())
+	}
+	if len(store.deleted) != 0 {
+		t.Fatalf("canceled assessment deleted skills: %v", store.deleted)
+	}
+	if len(store.upserted) != 1 || !store.upserted[0].LLMChecked {
+		t.Fatalf("retried assessment was not stored as checked: %+v", store.upserted)
+	}
+}
+
+func TestReconcileLeavesSkillUncheckedWhenServiceContextIsCanceled(t *testing.T) {
+	store := &fakeStore{unassessed: []model.Skill{{
+		ID: "org/repo/legacy", Source: "org/repo", Slug: "legacy", Name: "Legacy", Stars: 11,
+		Files: []model.File{{Path: "SKILL.md", Contents: "legacy contents"}},
+	}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := New(fakeSource{}, cancelingAuditor{}, store, time.Now).Reconcile(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Reconcile() error = %v, want context canceled", err)
+	}
+	if len(store.deleted) != 0 || len(store.upserted) != 0 {
+		t.Fatalf("interrupted assessment mutated store: deleted=%v upserted=%v", store.deleted, store.upserted)
+	}
+}
+
+type cancelingAuditor struct{}
+
+func (cancelingAuditor) Audit(context.Context, string) (audit.Result, error) {
+	return audit.Result{}, context.Canceled
+}
+
+type cancelOnceAuditor struct {
+	calls atomic.Int32
+}
+
+func (a *cancelOnceAuditor) Audit(context.Context, string) (audit.Result, error) {
+	if a.calls.Add(1) == 1 {
+		return audit.Result{}, context.Canceled
+	}
+	return audit.Result{Score: 8, QualityScore: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
+}
 
 type recordingAuditor struct {
 	mu    sync.Mutex
@@ -88,7 +236,7 @@ func (a *recordingAuditor) Audit(_ context.Context, contents string) (audit.Resu
 	a.mu.Lock()
 	a.calls = append(a.calls, contents)
 	a.mu.Unlock()
-	return audit.Result{Score: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
+	return audit.Result{Score: 8, QualityScore: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
 }
 
 func TestRunSkipsStoredSkillsUpdatedLessThanTwentyFourHoursAgo(t *testing.T) {
@@ -135,7 +283,7 @@ func (a *concurrentAuditor) Audit(context.Context, string) (audit.Result, error)
 		}
 	}
 	time.Sleep(20 * time.Millisecond)
-	return audit.Result{Score: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
+	return audit.Result{Score: 8, QualityScore: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
 }
 
 func TestRunAuditsEligibleSkillsConcurrently(t *testing.T) {
@@ -158,27 +306,74 @@ func TestRunAuditsEligibleSkillsConcurrently(t *testing.T) {
 	}
 }
 
-func TestRunStoresOnlyAuditsScoringAtLeastFive(t *testing.T) {
+func TestRunStoresOnlyAuditsScoringAtLeastFiveForSecurityAndQuality(t *testing.T) {
 	source := fakeSource{candidates: []Candidate{
 		{ID: "org/good/good", Source: "org/good", Slug: "good", Name: "Good", Stars: 11, Contents: "good", Files: []model.File{{Path: "SKILL.md", Contents: "good"}}},
 		{ID: "org/weak/weak", Source: "org/weak", Slug: "weak", Name: "Weak", Stars: 500, Contents: "weak"},
+		{ID: "org/poor/poor", Source: "org/poor", Slug: "poor", Name: "Poor", Stars: 500, Contents: "poor"},
+		{ID: "org/failed/failed", Source: "org/failed", Slug: "failed", Name: "Failed", Stars: 500, Contents: "failed"},
 		{ID: "org/tiny/tiny", Source: "org/tiny", Slug: "tiny", Name: "Tiny", Stars: 10, Contents: "tiny"},
 	}}
 	store := &fakeStore{}
-	i := New(source, fakeAuditor{scores: map[string]int{"good": 8, "weak": 4, "tiny": 10}}, store, func() time.Time { return time.Unix(100, 0).UTC() })
+	i := New(source, fakeAuditor{
+		scores:        map[string]int{"good": 8, "weak": 4, "poor": 9, "failed": 9, "tiny": 10},
+		qualityScores: map[string]int{"poor": 4},
+		statuses:      map[string]string{"failed": "fail"},
+	}, store, func() time.Time { return time.Unix(100, 0).UTC() })
 
 	stats, err := i.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Stored != 1 || stats.SkippedWeak != 1 || stats.SkippedStars != 1 {
+	if stats.Stored != 1 || stats.SkippedWeak != 3 || stats.SkippedStars != 1 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
-	if len(store.upserted) != 1 || store.upserted[0].SecurityScore != 8 {
+	if len(store.upserted) != 1 || store.upserted[0].SecurityScore != 8 || store.upserted[0].QualityScore != 8 {
 		t.Fatalf("unexpected stored skills: %+v", store.upserted)
 	}
-	if len(store.deleted) != 1 || store.deleted[0] != "org/weak/weak" {
-		t.Fatalf("weak skill was not removed: %+v", store.deleted)
+	if len(store.deleted) != 3 || !slices.Contains(store.deleted, "org/weak/weak") || !slices.Contains(store.deleted, "org/poor/poor") || !slices.Contains(store.deleted, "org/failed/failed") {
+		t.Fatalf("non-passing skills were not removed: %+v", store.deleted)
+	}
+}
+
+type blockingAuditor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (auditor blockingAuditor) Audit(context.Context, string) (audit.Result, error) {
+	close(auditor.started)
+	<-auditor.release
+	return audit.Result{Score: 8, QualityScore: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
+}
+
+func TestRunDoesNotPublishCandidateBeforeLLMAssessmentPasses(t *testing.T) {
+	store := &fakeStore{}
+	auditor := blockingAuditor{started: make(chan struct{}), release: make(chan struct{})}
+	index := New(fakeSource{candidates: []Candidate{{
+		ID: "org/repo/pending", Source: "org/repo", Slug: "pending", Name: "Pending", Stars: 11, Contents: "pending",
+	}}}, auditor, store, time.Now)
+	done := make(chan error, 1)
+	go func() {
+		_, err := index.Run(context.Background())
+		done <- err
+	}()
+
+	<-auditor.started
+	store.mu.Lock()
+	publishedWhilePending := len(store.upserted)
+	store.mu.Unlock()
+	if publishedWhilePending != 0 {
+		t.Fatalf("%d skills were published before the LLM assessment completed", publishedWhilePending)
+	}
+	close(auditor.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.upserted) != 1 {
+		t.Fatalf("published skills after passing assessment = %d, want 1", len(store.upserted))
 	}
 }
 

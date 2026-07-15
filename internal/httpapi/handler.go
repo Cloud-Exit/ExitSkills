@@ -19,9 +19,9 @@ import (
 
 type Repository interface {
 	ListSkills(context.Context, model.ListOptions) ([]model.Skill, int, error)
-	SearchSkills(context.Context, string, string, int) ([]model.Skill, error)
-	GetSkill(context.Context, string) (model.Skill, error)
-	CuratedSkills(context.Context) ([]model.Skill, error)
+	SearchSkills(context.Context, string, string, int, bool) ([]model.Skill, error)
+	GetSkill(context.Context, string, bool) (model.Skill, error)
+	CuratedSkills(context.Context, bool) ([]model.Skill, error)
 }
 type Verifier interface {
 	Verify(context.Context, string) (string, error)
@@ -33,12 +33,13 @@ type AdminRepository interface {
 	AdminStats(context.Context) (model.AdminStats, error)
 }
 type Handler struct {
-	repo        Repository
-	verifier    Verifier
-	limiter     *Limiter
-	adminRepo   AdminRepository
-	keys        *auth.KeyManager
-	masterToken string
+	repo           Repository
+	verifier       Verifier
+	limiter        *Limiter
+	adminRepo      AdminRepository
+	keys           *auth.KeyManager
+	masterToken    string
+	llmCheckedOnly bool
 }
 
 const masterKeyID = "__master__"
@@ -53,6 +54,12 @@ func WithAdmin(masterToken string, keys *auth.KeyManager, repo AdminRepository) 
 	}
 }
 
+func WithLLMEnforcement(enabled bool) Option {
+	return func(handler *Handler) {
+		handler.llmCheckedOnly = enabled
+	}
+}
+
 func NewHandler(repo Repository, verifier Verifier, limiter *Limiter, options ...Option) http.Handler {
 	handler := &Handler{repo: repo, verifier: verifier, limiter: limiter}
 	for _, option := range options {
@@ -62,6 +69,7 @@ func NewHandler(repo Repository, verifier Verifier, limiter *Limiter, options ..
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w.Header())
 	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
@@ -133,6 +141,7 @@ func (h *Handler) docs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline' https://cdn.redoc.ly; style-src 'unsafe-inline'; img-src data: https:; font-src data: https:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(page)
 }
@@ -156,7 +165,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "per_page must be between 1 and 500.")
 		return
 	}
-	skills, total, err := h.repo.ListSkills(r.Context(), model.ListOptions{View: view, Page: page, PerPage: perPage})
+	skills, total, err := h.repo.ListSkills(r.Context(), model.ListOptions{View: view, Page: page, PerPage: perPage, LLMCheckedOnly: h.llmCheckedOnly})
 	if err != nil {
 		internalError(w)
 		return
@@ -174,8 +183,13 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	if len(query) < 2 {
-		writeError(w, http.StatusBadRequest, "invalid_request", "q must contain at least 2 characters.")
+	if len(query) < 2 || len(query) > 256 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "q must contain between 2 and 256 characters.")
+		return
+	}
+	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+	if len(owner) > 100 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "owner must not exceed 100 characters.")
 		return
 	}
 	limit, ok := queryInt(r, "limit", 50, 1, 200)
@@ -183,7 +197,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "limit must be between 1 and 200.")
 		return
 	}
-	skills, err := h.repo.SearchSkills(r.Context(), query, r.URL.Query().Get("owner"), limit)
+	skills, err := h.repo.SearchSkills(r.Context(), query, owner, limit, h.llmCheckedOnly)
 	if err != nil {
 		internalError(w)
 		return
@@ -196,7 +210,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) curated(w http.ResponseWriter, r *http.Request) {
-	skills, err := h.repo.CuratedSkills(r.Context())
+	skills, err := h.repo.CuratedSkills(r.Context(), h.llmCheckedOnly)
 	if err != nil {
 		internalError(w)
 		return
@@ -228,7 +242,7 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, id, keyID strin
 		writeError(w, http.StatusNotFound, "not_found", "Skill not found.")
 		return
 	}
-	skill, err := h.repo.GetSkill(r.Context(), id)
+	skill, err := h.repo.GetSkill(r.Context(), id, h.llmCheckedOnly)
 	if errors.Is(err, model.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Skill not found.")
 		return
@@ -243,7 +257,12 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, id, keyID strin
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": skill.ID, "source": skill.Source, "slug": skill.Slug, "installs": skill.Installs, "hash": skill.Hash, "files": skill.Files, "securityScore": skill.SecurityScore})
+	payload := map[string]any{"id": skill.ID, "source": skill.Source, "slug": skill.Slug, "installs": skill.Installs, "hash": skill.Hash, "files": skill.Files, "llmChecked": skill.LLMChecked}
+	if skill.LLMChecked {
+		payload["securityScore"] = skill.SecurityScore
+		payload["qualityScore"] = skill.QualityScore
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (h *Handler) admin(w http.ResponseWriter, r *http.Request, path string) {
@@ -357,7 +376,7 @@ func (h *Handler) audit(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusNotFound, "not_found", "No audits exist for this skill.")
 		return
 	}
-	skill, err := h.repo.GetSkill(r.Context(), id)
+	skill, err := h.repo.GetSkill(r.Context(), id, h.llmCheckedOnly)
 	if errors.Is(err, model.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "No audits exist for this skill.")
 		return
@@ -366,7 +385,11 @@ func (h *Handler) audit(w http.ResponseWriter, r *http.Request, id string) {
 		internalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": skill.ID, "source": skill.Source, "slug": skill.Slug, "audits": []model.Audit{skill.Audit}, "securityScore": skill.SecurityScore})
+	if !skill.LLMChecked {
+		writeError(w, http.StatusNotFound, "not_found", "No audits exist for this skill.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": skill.ID, "source": skill.Source, "slug": skill.Slug, "audits": []model.Audit{skill.Audit}, "securityScore": skill.SecurityScore, "qualityScore": skill.QualityScore, "llmChecked": true})
 }
 
 func apiPath(path string) (string, bool) {
@@ -402,8 +425,13 @@ func validID(id string) bool {
 		return false
 	}
 	for _, p := range parts {
-		if p == "" || p == "." || p == ".." {
+		if p == "" || p == "." || p == ".." || len(p) > 100 {
 			return false
+		}
+		for _, r := range p {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+				return false
+			}
 		}
 	}
 	return true
@@ -426,4 +454,12 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func setSecurityHeaders(header http.Header) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Referrer-Policy", "no-referrer")
+	header.Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+	header.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 }

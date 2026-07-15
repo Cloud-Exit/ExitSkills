@@ -37,7 +37,9 @@ type Skill struct {
 	InstallURL        string `json:"installUrl"`
 	URL               string `json:"url"`
 	IsDuplicate       bool   `json:"isDuplicate,omitempty"`
-	SecurityScore     int    `json:"securityScore"`
+	SecurityScore     int    `json:"securityScore,omitempty"`
+	QualityScore      int    `json:"qualityScore,omitempty"`
+	LLMChecked        bool   `json:"llmChecked"`
 	Official          bool   `json:"official,omitempty"`
 	InstallsYesterday *int   `json:"installsYesterday,omitempty"`
 	Change            *int   `json:"change,omitempty"`
@@ -49,9 +51,10 @@ type Skill struct {
 }
 
 type ListOptions struct {
-	View    string
-	Page    int
-	PerPage int
+	View           string
+	Page           int
+	PerPage        int
+	LLMCheckedOnly bool
 }
 
 type Pagination struct {
@@ -74,7 +77,9 @@ type SkillStats struct {
 	Name             string        `json:"name"`
 	Source           string        `json:"source"`
 	Slug             string        `json:"slug"`
-	SecurityScore    int           `json:"securityScore"`
+	SecurityScore    int           `json:"securityScore,omitempty"`
+	QualityScore     int           `json:"qualityScore,omitempty"`
+	LLMChecked       bool          `json:"llmChecked"`
 	Downloads        int64         `json:"downloads"`
 	UniqueClients    int           `json:"uniqueClients"`
 	LastDownloadedAt *time.Time    `json:"lastDownloadedAt"`

@@ -15,7 +15,7 @@ $(foreach variable,$(DOTENV_VARIABLES),$(eval _ENV_$(variable) := $($(variable))
 $(foreach variable,$(DOTENV_VARIABLES),$(if $(_ENV_$(variable)),$(eval override $(variable) := $(_ENV_$(variable)))))
 $(foreach variable,$(DOTENV_VARIABLES),$(eval run admin: export $(variable) := $($(variable))))
 
-.PHONY: test test-race vet fmt-check build run admin docs docker-build helm-lint clean
+.PHONY: test test-race vet verify fmt-check build run admin docs docker-build helm-lint clean
 
 test:
 	$(GO) test ./...
@@ -25,6 +25,9 @@ test-race:
 
 vet:
 	$(GO) vet ./...
+
+verify:
+	$(GO) mod verify
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)

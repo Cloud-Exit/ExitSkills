@@ -17,8 +17,12 @@ func scanSkillStats(rows statsRows) (model.AdminStats, map[string]int, error) {
 	positions := make(map[string]int)
 	for rows.Next() {
 		var skill model.SkillStats
-		if err := rows.Scan(&skill.ID, &skill.Name, &skill.Source, &skill.Slug, &skill.SecurityScore); err != nil {
+		if err := rows.Scan(&skill.ID, &skill.Name, &skill.Source, &skill.Slug, &skill.SecurityScore, &skill.QualityScore, &skill.LLMChecked); err != nil {
 			return model.AdminStats{}, nil, err
+		}
+		if !skill.LLMChecked {
+			skill.SecurityScore = 0
+			skill.QualityScore = 0
 		}
 		skill.Clients = make([]model.ClientStats, 0)
 		positions[skill.ID] = len(stats.Skills)

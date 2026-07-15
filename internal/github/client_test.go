@@ -435,3 +435,19 @@ func TestDiscoverFailsInsteadOfSkippingCandidateAfterRateLimitRetries(t *testing
 		t.Fatalf("error = %v, want rateLimitError", err)
 	}
 }
+
+func TestMetadataBoundsUntrustedFields(t *testing.T) {
+	name, description := metadata("---\nname: " + strings.Repeat("n", 300) + "\ndescription: " + strings.Repeat("d", 1200) + "\n---")
+	if len(name) != 200 {
+		t.Fatalf("name length = %d, want 200", len(name))
+	}
+	if len(description) != 1000 {
+		t.Fatalf("description length = %d, want 1000", len(description))
+	}
+}
+
+func TestSlugifyBoundsUntrustedNames(t *testing.T) {
+	if slug := slugify(strings.Repeat("a", 200)); len(slug) != 100 {
+		t.Fatalf("slug length = %d, want 100", len(slug))
+	}
+}

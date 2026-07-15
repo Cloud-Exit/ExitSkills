@@ -47,6 +47,12 @@ func OpenSQLite(ctx context.Context, databaseURL string) (*SQLite, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("connect sqlite: %w", err)
 	}
+	if filePath != "" {
+		if err := os.Chmod(filePath, 0o600); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("secure SQLite database permissions: %w", err)
+		}
+	}
 	for _, pragma := range []string{"PRAGMA busy_timeout = 5000", "PRAGMA foreign_keys = ON", "PRAGMA journal_mode = WAL"} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
@@ -113,8 +119,46 @@ func (s *SQLite) Migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, string(schema))
-	return err
+	if _, err = s.db.ExecContext(ctx, string(schema)); err != nil {
+		return err
+	}
+	return s.ensureAssessmentColumns(ctx)
+}
+
+func (s *SQLite) ensureAssessmentColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(skills)`)
+	if err != nil {
+		return err
+	}
+	qualityFound, checkedFound := false, false
+	for rows.Next() {
+		var position, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&position, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		qualityFound = qualityFound || name == "quality_score"
+		checkedFound = checkedFound || name == "llm_checked"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !qualityFound {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE skills ADD COLUMN quality_score INTEGER CHECK (quality_score BETWEEN 5 AND 10)`); err != nil {
+			return fmt.Errorf("add SQLite quality score: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE skills SET quality_score=5 WHERE quality_score IS NULL`); err != nil {
+		return fmt.Errorf("initialize SQLite quality score: %w", err)
+	}
+	if !checkedFound {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE skills ADD COLUMN llm_checked INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add SQLite LLM status: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLite) UpsertSkill(ctx context.Context, skill model.Skill) error {
@@ -127,16 +171,16 @@ func (s *SQLite) UpsertSkill(ctx context.Context, skill model.Skill) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO skills (`+columns+`) VALUES
-(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT (id) DO UPDATE SET slug=excluded.slug,name=excluded.name,description=excluded.description,
 source=excluded.source,installs=excluded.installs,stars=excluded.stars,source_type=excluded.source_type,
 install_url=excluded.install_url,public_url=excluded.public_url,is_duplicate=excluded.is_duplicate,
-security_score=excluded.security_score,official=excluded.official,content_hash=excluded.content_hash,
+security_score=excluded.security_score,quality_score=excluded.quality_score,llm_checked=excluded.llm_checked,official=excluded.official,content_hash=excluded.content_hash,
 files=excluded.files,audit_provider=excluded.audit_provider,audit_slug=excluded.audit_slug,
 audit_status=excluded.audit_status,audit_summary=excluded.audit_summary,audit_risk_level=excluded.audit_risk_level,
 audit_categories=excluded.audit_categories,audited_at=excluded.audited_at,updated_at=excluded.updated_at`,
 		skill.ID, skill.Slug, skill.Name, skill.Description, skill.Source, skill.Installs, skill.Stars, skill.SourceType,
-		skill.InstallURL, skill.URL, skill.IsDuplicate, skill.SecurityScore, skill.Official, skill.Hash, files,
+		skill.InstallURL, skill.URL, skill.IsDuplicate, skill.SecurityScore, skill.QualityScore, skill.LLMChecked, skill.Official, skill.Hash, files,
 		skill.Audit.Provider, skill.Audit.Slug, skill.Audit.Status, skill.Audit.Summary, skill.Audit.RiskLevel,
 		categories, skill.Audit.AuditedAt, skill.UpdatedAt)
 	return err
@@ -149,10 +193,10 @@ func (s *SQLite) DeleteSkill(ctx context.Context, id string) error {
 
 func (s *SQLite) ListSkills(ctx context.Context, options model.ListOptions) ([]model.Skill, int, error) {
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM skills`).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM skills WHERE quality_score IS NOT NULL AND (?=0 OR llm_checked=1)`, options.LLMCheckedOnly).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills ORDER BY stars DESC, id ASC LIMIT ? OFFSET ?`, options.PerPage, options.Page*options.PerPage)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills WHERE quality_score IS NOT NULL AND (?=0 OR llm_checked=1) ORDER BY stars DESC, id ASC LIMIT ? OFFSET ?`, options.LLMCheckedOnly, options.PerPage, options.Page*options.PerPage)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -161,13 +205,13 @@ func (s *SQLite) ListSkills(ctx context.Context, options model.ListOptions) ([]m
 	return skills, total, err
 }
 
-func (s *SQLite) SearchSkills(ctx context.Context, query, owner string, limit int) ([]model.Skill, error) {
+func (s *SQLite) SearchSkills(ctx context.Context, query, owner string, limit int, llmCheckedOnly bool) ([]model.Skill, error) {
 	pattern := "%" + query + "%"
-	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills WHERE
+	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills WHERE quality_score IS NOT NULL AND (?=0 OR llm_checked=1) AND
 (lower(name) LIKE lower(?) OR lower(source) LIKE lower(?) OR lower(description) LIKE lower(?))
 AND (?='' OR source LIKE ?||'/%')
 ORDER BY CASE WHEN lower(name)=lower(?) THEN 0 WHEN lower(name) LIKE lower(?)||'%' THEN 1 ELSE 2 END,
-stars DESC LIMIT ?`, pattern, pattern, pattern, owner, owner, query, query, limit)
+stars DESC LIMIT ?`, llmCheckedOnly, pattern, pattern, pattern, owner, owner, query, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -175,8 +219,8 @@ stars DESC LIMIT ?`, pattern, pattern, pattern, owner, owner, query, query, limi
 	return scanSQLiteSkills(rows)
 }
 
-func (s *SQLite) GetSkill(ctx context.Context, id string) (model.Skill, error) {
-	skill, err := scanSkill(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM skills WHERE id=?`, id))
+func (s *SQLite) GetSkill(ctx context.Context, id string, llmCheckedOnly bool) (model.Skill, error) {
+	skill, err := scanSkill(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM skills WHERE id=? AND quality_score IS NOT NULL AND (?=0 OR llm_checked=1)`, id, llmCheckedOnly))
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Skill{}, model.ErrNotFound
 	}
@@ -184,7 +228,7 @@ func (s *SQLite) GetSkill(ctx context.Context, id string) (model.Skill, error) {
 }
 
 func (s *SQLite) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[string]struct{}, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM skills WHERE updated_at>?`, cutoff.UTC())
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM skills WHERE quality_score IS NOT NULL AND updated_at>?`, cutoff.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -199,9 +243,17 @@ func (s *SQLite) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[strin
 	}
 	return ids, rows.Err()
 }
+func (s *SQLite) UnassessedSkills(ctx context.Context) ([]model.Skill, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills WHERE llm_checked=0 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSQLiteSkills(rows)
+}
 
-func (s *SQLite) CuratedSkills(ctx context.Context) ([]model.Skill, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills WHERE official=1 ORDER BY source, stars DESC, id`)
+func (s *SQLite) CuratedSkills(ctx context.Context, llmCheckedOnly bool) ([]model.Skill, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills WHERE official=1 AND quality_score IS NOT NULL AND (?=0 OR llm_checked=1) ORDER BY source, stars DESC, id`, llmCheckedOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +324,7 @@ downloads=skill_downloads.downloads+1,last_downloaded_at=excluded.last_downloade
 }
 
 func (s *SQLite) AdminStats(ctx context.Context) (model.AdminStats, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,source,slug,security_score FROM skills ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,source,slug,security_score,quality_score,llm_checked FROM skills WHERE quality_score IS NOT NULL ORDER BY id`)
 	if err != nil {
 		return model.AdminStats{}, err
 	}

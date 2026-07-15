@@ -18,13 +18,13 @@ type fakeRepository struct{ skills []model.Skill }
 func (f fakeRepository) ListSkills(_ context.Context, _ model.ListOptions) ([]model.Skill, int, error) {
 	return f.skills, len(f.skills), nil
 }
-func (f fakeRepository) SearchSkills(_ context.Context, _ string, _ string, limit int) ([]model.Skill, error) {
+func (f fakeRepository) SearchSkills(_ context.Context, _ string, _ string, limit int, _ bool) ([]model.Skill, error) {
 	if limit < len(f.skills) {
 		return f.skills[:limit], nil
 	}
 	return f.skills, nil
 }
-func (f fakeRepository) GetSkill(_ context.Context, id string) (model.Skill, error) {
+func (f fakeRepository) GetSkill(_ context.Context, id string, _ bool) (model.Skill, error) {
 	for _, skill := range f.skills {
 		if skill.ID == id {
 			return skill, nil
@@ -32,7 +32,9 @@ func (f fakeRepository) GetSkill(_ context.Context, id string) (model.Skill, err
 	}
 	return model.Skill{}, model.ErrNotFound
 }
-func (f fakeRepository) CuratedSkills(_ context.Context) ([]model.Skill, error) { return f.skills, nil }
+func (f fakeRepository) CuratedSkills(_ context.Context, _ bool) ([]model.Skill, error) {
+	return f.skills, nil
+}
 
 type fakeVerifier struct{}
 
@@ -44,7 +46,7 @@ func (fakeVerifier) Verify(_ context.Context, token string) (string, error) {
 }
 
 func testHandler(limit int) http.Handler {
-	skill := model.Skill{ID: "exitmesh/skills/audit", Slug: "audit", Name: "Audit", Source: "exitmesh/skills", Stars: 42, Installs: 42, SourceType: "github", InstallURL: "https://github.com/exitmesh/skills", URL: "https://skills.exitmesh.com/exitmesh/skills/audit", SecurityScore: 9, Official: true, Audit: model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: "pass", Summary: "safe", AuditedAt: time.Unix(1, 0).UTC(), RiskLevel: "LOW"}}
+	skill := model.Skill{ID: "exitmesh/skills/audit", Slug: "audit", Name: "Audit", Source: "exitmesh/skills", Stars: 42, Installs: 42, SourceType: "github", InstallURL: "https://github.com/exitmesh/skills", URL: "https://skills.exitmesh.com/exitmesh/skills/audit", SecurityScore: 9, QualityScore: 8, LLMChecked: true, Official: true, Audit: model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: "pass", Summary: "safe", AuditedAt: time.Unix(1, 0).UTC(), RiskLevel: "LOW"}}
 	return NewHandler(fakeRepository{skills: []model.Skill{skill}}, fakeVerifier{}, NewLimiter(limit, time.Minute))
 }
 
@@ -83,7 +85,7 @@ func TestDocsSupportsDocumentedAndShortRoutesWithoutAuthentication(t *testing.T)
 		if contentType := res.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
 			t.Fatalf("%s content type = %q, want text/html", route, contentType)
 		}
-		for _, expected := range []string{"ExitMesh Skills API", "Redoc.init(spec", `"/v1/skills"`} {
+		for _, expected := range []string{"ExitSkills API", "Redoc.init(spec", `"/v1/skills"`} {
 			if !strings.Contains(res.Body.String(), expected) {
 				t.Fatalf("%s body is missing %q", route, expected)
 			}
@@ -101,6 +103,59 @@ func TestAuthenticationAndErrors(t *testing.T) {
 	_ = json.NewDecoder(res.Body).Decode(&body)
 	if body["error"] != "unauthorized" || body["message"] == "" {
 		t.Fatalf("unexpected error: %v", body)
+	}
+}
+
+func TestResponsesIncludeSecurityHeaders(t *testing.T) {
+	for _, route := range []string{"/healthz", "/v1/skills", "/v1/docs"} {
+		req := httptest.NewRequest(http.MethodGet, route, nil)
+		if route == "/v1/skills" {
+			req.Header.Set("Authorization", "Bearer test")
+		}
+		res := httptest.NewRecorder()
+		testHandler(10).ServeHTTP(res, req)
+		for name, want := range map[string]string{
+			"X-Content-Type-Options": "nosniff",
+			"X-Frame-Options":        "DENY",
+			"Referrer-Policy":        "no-referrer",
+		} {
+			if got := res.Header().Get(name); got != want {
+				t.Errorf("%s %s = %q, want %q", route, name, got, want)
+			}
+		}
+		if got := res.Header().Get("Content-Security-Policy"); got == "" {
+			t.Errorf("%s is missing Content-Security-Policy", route)
+		}
+	}
+}
+
+func TestSearchRejectsOversizedInputs(t *testing.T) {
+	for _, query := range []string{
+		"q=" + strings.Repeat("a", 257),
+		"q=safe&owner=" + strings.Repeat("a", 101),
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/skills/search?"+query, nil)
+		req.Header.Set("Authorization", "Bearer test")
+		res := httptest.NewRecorder()
+		testHandler(10).ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("query %q status = %d, want 400", query[:20], res.Code)
+		}
+	}
+}
+
+func TestValidIDRejectsOversizedAndUnsafeComponents(t *testing.T) {
+	for _, id := range []string{
+		strings.Repeat("a", 101) + "/repo/skill",
+		"owner/repo/skill\\name",
+		"owner/repo/skill name",
+	} {
+		if validID(id) {
+			t.Fatalf("validID(%q) = true, want false", id)
+		}
+	}
+	if !validID("owner/repo/skill-name_1.0") {
+		t.Fatal("validID() rejected a normal skill ID")
 	}
 }
 
@@ -129,6 +184,32 @@ func TestDetailAndAuditCompatibility(t *testing.T) {
 		if res.Code != http.StatusOK {
 			t.Fatalf("%s status = %d: %s", path, res.Code, res.Body.String())
 		}
+		if !strings.Contains(res.Body.String(), `"qualityScore":8`) {
+			t.Fatalf("%s response is missing persisted quality score: %s", path, res.Body.String())
+		}
+	}
+}
+
+func TestUncheckedSkillIsPublishedWithoutImpliedLLMScores(t *testing.T) {
+	skill := model.Skill{ID: "org/repo/unchecked", Slug: "unchecked", Name: "Unchecked", Source: "org/repo", Stars: 11, Installs: 11}
+	handler := NewHandler(fakeRepository{skills: []model.Skill{skill}}, fakeVerifier{}, NewLimiter(10, time.Minute))
+	req := httptest.NewRequest(http.MethodGet, "/v1/skills/org/repo/unchecked", nil)
+	req.Header.Set("Authorization", "Bearer test")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("detail status = %d: %s", res.Code, res.Body.String())
+	}
+	if strings.Contains(res.Body.String(), "securityScore") || strings.Contains(res.Body.String(), "qualityScore") || !strings.Contains(res.Body.String(), `"llmChecked":false`) {
+		t.Fatalf("unchecked detail exposed implied scores: %s", res.Body.String())
+	}
+
+	auditRequest := httptest.NewRequest(http.MethodGet, "/v1/skills/audit/org/repo/unchecked", nil)
+	auditRequest.Header.Set("Authorization", "Bearer test")
+	auditResponse := httptest.NewRecorder()
+	handler.ServeHTTP(auditResponse, auditRequest)
+	if auditResponse.Code != http.StatusNotFound {
+		t.Fatalf("unchecked audit status = %d, want 404", auditResponse.Code)
 	}
 }
 
@@ -186,7 +267,7 @@ func adminTestHandler(t *testing.T, admin *fakeAdminRepository) (http.Handler, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	skill := model.Skill{ID: "exitmesh/skills/audit", Slug: "audit", Name: "Audit", Source: "exitmesh/skills", Stars: 42, Installs: 42, SecurityScore: 9}
+	skill := model.Skill{ID: "exitmesh/skills/audit", Slug: "audit", Name: "Audit", Source: "exitmesh/skills", Stars: 42, Installs: 42, SecurityScore: 9, QualityScore: 8, LLMChecked: true}
 	handler := NewHandler(fakeRepository{skills: []model.Skill{skill}}, fakeVerifier{}, NewLimiter(10, time.Minute), WithAdmin("master-secret", keys, admin))
 	return handler, keys
 }

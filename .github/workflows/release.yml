@@ -16,14 +16,15 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
+          go-version: 1.26.5
           cache: true
-      - uses: azure/setup-helm@v4
+      - uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Choose version
         id: version
         shell: bash
@@ -33,7 +34,7 @@ jobs:
           echo "chart_version=${version#v}" >> "$GITHUB_OUTPUT"
       - name: Test and build
         run: |
-          make fmt-check vet test-race
+          make fmt-check verify vet test-race
           make build VERSION="${{ steps.version.outputs.version }}"
       - name: Package Helm chart
         run: |
@@ -61,4 +62,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: gh release create "$VERSION" dist/* --target "$GITHUB_SHA" --generate-notes --title "$VERSION"
-

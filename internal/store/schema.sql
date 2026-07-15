@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS skills (
     public_url TEXT NOT NULL,
     is_duplicate BOOLEAN NOT NULL DEFAULT FALSE,
     security_score SMALLINT NOT NULL CHECK (security_score BETWEEN 5 AND 10),
+    quality_score SMALLINT NOT NULL CHECK (quality_score BETWEEN 5 AND 10),
+    llm_checked BOOLEAN NOT NULL DEFAULT FALSE,
     official BOOLEAN NOT NULL DEFAULT FALSE,
     content_hash TEXT NOT NULL,
     files JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -51,3 +53,8 @@ CREATE TABLE IF NOT EXISTS skill_downloads (
 );
 
 CREATE INDEX IF NOT EXISTS skill_downloads_last_idx ON skill_downloads (last_downloaded_at DESC);
+
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS quality_score SMALLINT CHECK (quality_score BETWEEN 5 AND 10);
+UPDATE skills SET quality_score = 5 WHERE quality_score IS NULL;
+ALTER TABLE skills ALTER COLUMN quality_score SET NOT NULL;
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS llm_checked BOOLEAN NOT NULL DEFAULT FALSE;

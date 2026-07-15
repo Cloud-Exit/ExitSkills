@@ -57,12 +57,12 @@ func Render(writer io.Writer, rawSpec []byte, redocVersion string) error {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="ExitMesh Skills API reference">
-  <title>ExitMesh Skills API</title>
+  <meta name="description" content="ExitSkills API reference">
+  <title>ExitSkills API</title>
   <style>body{margin:0;padding:0}noscript{display:block;padding:2rem;font-family:sans-serif}</style>
 </head>
 <body>
-  <noscript>JavaScript is required to render the ExitMesh Skills API reference.</noscript>
+  <noscript>JavaScript is required to render the ExitSkills API reference.</noscript>
   <div id="redoc-container"></div>
   <script src="https://cdn.redoc.ly/redoc/%s/bundles/redoc.standalone.js"></script>
   <script>

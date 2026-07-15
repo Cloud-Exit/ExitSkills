@@ -19,10 +19,11 @@ type Backend interface {
 	UpsertSkill(context.Context, model.Skill) error
 	DeleteSkill(context.Context, string) error
 	ListSkills(context.Context, model.ListOptions) ([]model.Skill, int, error)
-	SearchSkills(context.Context, string, string, int) ([]model.Skill, error)
-	GetSkill(context.Context, string) (model.Skill, error)
+	SearchSkills(context.Context, string, string, int, bool) ([]model.Skill, error)
+	GetSkill(context.Context, string, bool) (model.Skill, error)
 	FreshSkillIDs(context.Context, time.Time) (map[string]struct{}, error)
-	CuratedSkills(context.Context) ([]model.Skill, error)
+	UnassessedSkills(context.Context) ([]model.Skill, error)
+	CuratedSkills(context.Context, bool) ([]model.Skill, error)
 	CreateAPIKey(context.Context, auth.KeyRecord) (string, error)
 	RevokeAPIKey(context.Context, string) (bool, error)
 	LookupAPIKey(context.Context, []byte) (string, error)

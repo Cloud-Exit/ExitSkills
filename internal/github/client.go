@@ -913,13 +913,16 @@ func metadata(contents string) (string, string) {
 			name = strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
 		}
 	}
-	return name, description
+	return truncateRunes(name, 200), truncateRunes(description, 1000)
 }
 func slugify(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	var out strings.Builder
 	dash := false
 	for _, r := range value {
+		if out.Len() >= 100 {
+			break
+		}
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			out.WriteRune(r)
 			dash = false
@@ -929,6 +932,14 @@ func slugify(value string) string {
 		}
 	}
 	return strings.Trim(out.String(), "-")
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }
 func sourceParts(source string) (string, string) {
 	parts := strings.SplitN(source, "/", 2)

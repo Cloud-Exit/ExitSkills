@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -44,7 +45,7 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 }
 
 const columns = `id, slug, name, description, source, installs, stars, source_type, install_url, public_url,
- is_duplicate, security_score, official, content_hash, files, audit_provider, audit_slug, audit_status,
+ is_duplicate, security_score, quality_score, llm_checked, official, content_hash, files, audit_provider, audit_slug, audit_status,
  audit_summary, audit_risk_level, audit_categories, audited_at, updated_at`
 
 func (p *Postgres) UpsertSkill(ctx context.Context, skill model.Skill) error {
@@ -57,16 +58,16 @@ func (p *Postgres) UpsertSkill(ctx context.Context, skill model.Skill) error {
 		return err
 	}
 	_, err = p.pool.Exec(ctx, `INSERT INTO skills (`+columns+`) VALUES
-($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 ON CONFLICT (id) DO UPDATE SET slug=EXCLUDED.slug,name=EXCLUDED.name,description=EXCLUDED.description,
 source=EXCLUDED.source,installs=EXCLUDED.installs,stars=EXCLUDED.stars,source_type=EXCLUDED.source_type,
 install_url=EXCLUDED.install_url,public_url=EXCLUDED.public_url,is_duplicate=EXCLUDED.is_duplicate,
-security_score=EXCLUDED.security_score,official=EXCLUDED.official,content_hash=EXCLUDED.content_hash,
+security_score=EXCLUDED.security_score,quality_score=EXCLUDED.quality_score,llm_checked=EXCLUDED.llm_checked,official=EXCLUDED.official,content_hash=EXCLUDED.content_hash,
 files=EXCLUDED.files,audit_provider=EXCLUDED.audit_provider,audit_slug=EXCLUDED.audit_slug,
 audit_status=EXCLUDED.audit_status,audit_summary=EXCLUDED.audit_summary,audit_risk_level=EXCLUDED.audit_risk_level,
 audit_categories=EXCLUDED.audit_categories,audited_at=EXCLUDED.audited_at,updated_at=EXCLUDED.updated_at`,
 		skill.ID, skill.Slug, skill.Name, skill.Description, skill.Source, skill.Installs, skill.Stars, skill.SourceType,
-		skill.InstallURL, skill.URL, skill.IsDuplicate, skill.SecurityScore, skill.Official, skill.Hash, files,
+		skill.InstallURL, skill.URL, skill.IsDuplicate, skill.SecurityScore, skill.QualityScore, skill.LLMChecked, skill.Official, skill.Hash, files,
 		skill.Audit.Provider, skill.Audit.Slug, skill.Audit.Status, skill.Audit.Summary, skill.Audit.RiskLevel,
 		categories, skill.Audit.AuditedAt, skill.UpdatedAt)
 	return err
@@ -79,10 +80,10 @@ func (p *Postgres) DeleteSkill(ctx context.Context, id string) error {
 
 func (p *Postgres) ListSkills(ctx context.Context, options model.ListOptions) ([]model.Skill, int, error) {
 	var total int
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM skills`).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM skills WHERE quality_score IS NOT NULL AND (NOT $1 OR llm_checked=TRUE)`, options.LLMCheckedOnly).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills ORDER BY stars DESC, id ASC LIMIT $1 OFFSET $2`, options.PerPage, options.Page*options.PerPage)
+	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE quality_score IS NOT NULL AND (NOT $1 OR llm_checked=TRUE) ORDER BY stars DESC, id ASC LIMIT $2 OFFSET $3`, options.LLMCheckedOnly, options.PerPage, options.Page*options.PerPage)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -91,19 +92,19 @@ func (p *Postgres) ListSkills(ctx context.Context, options model.ListOptions) ([
 	return skills, total, err
 }
 
-func (p *Postgres) SearchSkills(ctx context.Context, query, owner string, limit int) ([]model.Skill, error) {
+func (p *Postgres) SearchSkills(ctx context.Context, query, owner string, limit int, llmCheckedOnly bool) ([]model.Skill, error) {
 	pattern := "%" + query + "%"
-	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE
-(name ILIKE $1 OR source ILIKE $1 OR description ILIKE $1) AND ($2='' OR split_part(source,'/',1)=$2)
-ORDER BY CASE WHEN lower(name)=lower($3) THEN 0 WHEN name ILIKE $3||'%' THEN 1 ELSE 2 END, stars DESC LIMIT $4`, pattern, owner, query, limit)
+	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE quality_score IS NOT NULL AND (NOT $1 OR llm_checked=TRUE) AND
+(name ILIKE $2 OR source ILIKE $2 OR description ILIKE $2) AND ($3='' OR split_part(source,'/',1)=$3)
+ORDER BY CASE WHEN lower(name)=lower($4) THEN 0 WHEN name ILIKE $4||'%' THEN 1 ELSE 2 END, stars DESC LIMIT $5`, llmCheckedOnly, pattern, owner, query, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanPostgresSkills(rows)
 }
-func (p *Postgres) GetSkill(ctx context.Context, id string) (model.Skill, error) {
-	row := p.pool.QueryRow(ctx, `SELECT `+columns+` FROM skills WHERE id=$1`, id)
+func (p *Postgres) GetSkill(ctx context.Context, id string, llmCheckedOnly bool) (model.Skill, error) {
+	row := p.pool.QueryRow(ctx, `SELECT `+columns+` FROM skills WHERE id=$1 AND quality_score IS NOT NULL AND (NOT $2 OR llm_checked=TRUE)`, id, llmCheckedOnly)
 	skill, err := scanSkill(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Skill{}, model.ErrNotFound
@@ -111,7 +112,7 @@ func (p *Postgres) GetSkill(ctx context.Context, id string) (model.Skill, error)
 	return skill, err
 }
 func (p *Postgres) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[string]struct{}, error) {
-	rows, err := p.pool.Query(ctx, `SELECT id FROM skills WHERE updated_at>$1`, cutoff.UTC())
+	rows, err := p.pool.Query(ctx, `SELECT id FROM skills WHERE quality_score IS NOT NULL AND updated_at>$1`, cutoff.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -126,8 +127,16 @@ func (p *Postgres) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[str
 	}
 	return ids, rows.Err()
 }
-func (p *Postgres) CuratedSkills(ctx context.Context) ([]model.Skill, error) {
-	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE official=TRUE ORDER BY source, stars DESC, id`)
+func (p *Postgres) UnassessedSkills(ctx context.Context) ([]model.Skill, error) {
+	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE llm_checked=FALSE ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPostgresSkills(rows)
+}
+func (p *Postgres) CuratedSkills(ctx context.Context, llmCheckedOnly bool) ([]model.Skill, error) {
+	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE official=TRUE AND quality_score IS NOT NULL AND (NOT $1 OR llm_checked=TRUE) ORDER BY source, stars DESC, id`, llmCheckedOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +149,8 @@ type scanner interface{ Scan(...any) error }
 func scanSkill(row scanner) (model.Skill, error) {
 	var skill model.Skill
 	var files, categories []byte
-	err := row.Scan(&skill.ID, &skill.Slug, &skill.Name, &skill.Description, &skill.Source, &skill.Installs, &skill.Stars, &skill.SourceType, &skill.InstallURL, &skill.URL, &skill.IsDuplicate, &skill.SecurityScore, &skill.Official, &skill.Hash, &files, &skill.Audit.Provider, &skill.Audit.Slug, &skill.Audit.Status, &skill.Audit.Summary, &skill.Audit.RiskLevel, &categories, &skill.Audit.AuditedAt, &skill.UpdatedAt)
+	var qualityScore sql.NullInt64
+	err := row.Scan(&skill.ID, &skill.Slug, &skill.Name, &skill.Description, &skill.Source, &skill.Installs, &skill.Stars, &skill.SourceType, &skill.InstallURL, &skill.URL, &skill.IsDuplicate, &skill.SecurityScore, &qualityScore, &skill.LLMChecked, &skill.Official, &skill.Hash, &files, &skill.Audit.Provider, &skill.Audit.Slug, &skill.Audit.Status, &skill.Audit.Summary, &skill.Audit.RiskLevel, &categories, &skill.Audit.AuditedAt, &skill.UpdatedAt)
 	if err != nil {
 		return model.Skill{}, err
 	}
@@ -149,6 +159,13 @@ func scanSkill(row scanner) (model.Skill, error) {
 	}
 	if err := json.Unmarshal(categories, &skill.Audit.Categories); err != nil {
 		return model.Skill{}, err
+	}
+	if qualityScore.Valid {
+		skill.QualityScore = int(qualityScore.Int64)
+	}
+	if !skill.LLMChecked {
+		skill.SecurityScore = 0
+		skill.QualityScore = 0
 	}
 	return skill, nil
 }
@@ -197,7 +214,7 @@ downloads=skill_downloads.downloads+1,last_downloaded_at=EXCLUDED.last_downloade
 }
 
 func (p *Postgres) AdminStats(ctx context.Context) (model.AdminStats, error) {
-	rows, err := p.pool.Query(ctx, `SELECT id,name,source,slug,security_score FROM skills ORDER BY id`)
+	rows, err := p.pool.Query(ctx, `SELECT id,name,source,slug,security_score,quality_score,llm_checked FROM skills WHERE quality_score IS NOT NULL ORDER BY id`)
 	if err != nil {
 		return model.AdminStats{}, err
 	}

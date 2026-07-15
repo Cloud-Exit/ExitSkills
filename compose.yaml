@@ -1,0 +1,54 @@
+name: exitskills
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: exitskills
+      POSTGRES_USER: exitskills
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the Compose environment file}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exitskills -d exitskills"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  exitskills:
+    build:
+      context: .
+    image: exitskills:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${EXITSKILLS_PORT:-8111}:8080"
+    environment:
+      DATABASE_URL: postgres://exitskills:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the Compose environment file}@postgres:5432/exitskills?sslmode=disable
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in the Compose environment file}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in the Compose environment file}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in the Compose environment file}
+      MASTER_TOKEN: ${MASTER_TOKEN:?set MASTER_TOKEN in the Compose environment file}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      LISTEN_ADDRESS: :8080
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8111}
+      INDEX_INTERVAL: ${INDEX_INTERVAL:-24h}
+      INDEX_ON_START: ${INDEX_ON_START:-true}
+      INDEX_CONCURRENCY: ${INDEX_CONCURRENCY:-8}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+volumes:
+  postgres-data:

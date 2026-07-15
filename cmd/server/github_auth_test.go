@@ -2,7 +2,9 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/exitmesh/skills/internal/config"
 )
@@ -25,6 +27,34 @@ func TestGitHubAuthenticatorSelectsConfiguredMode(t *testing.T) {
 				t.Fatalf("authenticator name = %q, want %q", authenticator.Name(), test.want)
 			}
 		})
+	}
+}
+
+func TestHTTPServerBoundsRequestHeaders(t *testing.T) {
+	server := newHTTPServer(":0", http.NotFoundHandler())
+	if server.MaxHeaderBytes <= 0 || server.MaxHeaderBytes > 64<<10 {
+		t.Fatalf("MaxHeaderBytes = %d, want a positive bound no larger than 64 KiB", server.MaxHeaderBytes)
+	}
+}
+
+func TestOutboundHTTPClientDoesNotFollowRedirects(t *testing.T) {
+	redirected := false
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected = true
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	response, err := newOutboundHTTPClient(time.Second).Get(source.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusFound || redirected {
+		t.Fatalf("redirect status = %d, target visited = %t", response.StatusCode, redirected)
 	}
 }
 

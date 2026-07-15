@@ -42,14 +42,26 @@ func TestOpenAPISpecCoversServiceRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var spec struct {
-		OpenAPI string                                `json:"openapi"`
-		Paths   map[string]map[string]json.RawMessage `json:"paths"`
+		OpenAPI string `json:"openapi"`
+		Info    struct {
+			Title string `json:"title"`
+		} `json:"info"`
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
 	}
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		t.Fatal(err)
 	}
 	if spec.OpenAPI != "3.1.0" {
 		t.Fatalf("openapi = %q, want 3.1.0", spec.OpenAPI)
+	}
+	if spec.Info.Title != "ExitSkills API" {
+		t.Fatalf("info.title = %q, want ExitSkills API", spec.Info.Title)
+	}
+	if count := strings.Count(string(raw), `"qualityScore"`); count < 4 {
+		t.Fatalf("OpenAPI spec contains qualityScore %d times, want it in catalog, detail, audit, and stats schemas", count)
+	}
+	if count := strings.Count(string(raw), `"llmChecked"`); count < 4 {
+		t.Fatalf("OpenAPI spec contains llmChecked %d times, want assessment state in catalog, detail, audit, and stats schemas", count)
 	}
 	want := map[string][]string{
 		"/v1/docs":                                {"get"},

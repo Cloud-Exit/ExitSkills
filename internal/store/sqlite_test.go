@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,8 +35,95 @@ func TestSQLiteCreatesDatabaseFileAndMigratesIdempotently(t *testing.T) {
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("second Migrate() failed: %v", err)
 	}
-	if _, err := os.Stat(path); err != nil {
+	info, err := os.Stat(path)
+	if err != nil {
 		t.Fatalf("SQLite database was not created: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("SQLite database mode = %o, want 600", mode)
+	}
+}
+
+func TestSQLiteMigrationAddsAssessmentStateToExistingCatalog(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenSQLite(ctx, "sqlite://:memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schema, err := sqliteMigrations.ReadFile("sqlite_schema.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(schema), "    quality_score INTEGER NOT NULL CHECK (quality_score BETWEEN 5 AND 10),\n", "", 1)
+	legacy = strings.Replace(legacy, "    llm_checked INTEGER NOT NULL DEFAULT 0,\n", "", 1)
+	if _, err := db.db.ExecContext(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.db.QueryContext(ctx, "PRAGMA table_info(skills)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	qualityFound, checkedFound := false, false
+	for rows.Next() {
+		var position, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&position, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		qualityFound = qualityFound || name == "quality_score"
+		checkedFound = checkedFound || name == "llm_checked"
+	}
+	if !qualityFound || !checkedFound {
+		t.Fatalf("assessment columns missing: quality=%t checked=%t", qualityFound, checkedFound)
+	}
+	legacySkill := testSkill()
+	legacySkill.LLMChecked = false
+	if err := db.UpsertSkill(ctx, legacySkill); err != nil {
+		t.Fatal(err)
+	}
+	unchecked, err := db.UnassessedSkills(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchecked) != 1 || unchecked[0].ID != legacySkill.ID || unchecked[0].LLMChecked {
+		t.Fatalf("unchecked legacy skills = %+v", unchecked)
+	}
+	listed, total, err := db.ListSkills(ctx, model.ListOptions{PerPage: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(listed) != 1 || listed[0].SecurityScore != 0 || listed[0].QualityScore != 0 {
+		t.Fatalf("disabled-LLM skill representation: total=%d skills=%+v", total, listed)
+	}
+	published, publishedTotal, err := db.ListSkills(ctx, model.ListOptions{PerPage: 10, LLMCheckedOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publishedTotal != 0 || len(published) != 0 {
+		t.Fatalf("AI-enforced catalog exposed unchecked skill: total=%d skills=%+v", publishedTotal, published)
+	}
+	searched, err := db.SearchSkills(ctx, legacySkill.Name, "", 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searched) != 0 {
+		t.Fatalf("AI-enforced search exposed unchecked skill: %+v", searched)
+	}
+	if _, err := db.GetSkill(ctx, legacySkill.ID, true); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("AI-enforced detail error = %v, want not found", err)
+	}
+	curated, err := db.CuratedSkills(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(curated) != 0 {
+		t.Fatalf("AI-enforced curated catalog exposed unchecked skill: %+v", curated)
 	}
 }
 
@@ -54,11 +142,11 @@ func TestSQLiteSkillRepositoryCompatibility(t *testing.T) {
 		t.Fatalf("unexpected list: total=%d skills=%+v", total, listed)
 	}
 
-	found, err := db.GetSkill(ctx, skill.ID)
+	found, err := db.GetSkill(ctx, skill.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if found.Hash != skill.Hash || found.Audit.Summary != skill.Audit.Summary || len(found.Files) != 1 {
+	if found.Hash != skill.Hash || found.Audit.Summary != skill.Audit.Summary || found.QualityScore != skill.QualityScore || len(found.Files) != 1 {
 		t.Fatalf("unexpected stored skill: %+v", found)
 	}
 	fresh, err := db.FreshSkillIDs(ctx, skill.UpdatedAt.Add(-24*time.Hour))
@@ -76,7 +164,7 @@ func TestSQLiteSkillRepositoryCompatibility(t *testing.T) {
 		t.Fatalf("skill updated exactly at cutoff was marked fresh: %v", atBoundary)
 	}
 
-	searched, err := db.SearchSkills(ctx, "demo", "acme", 10)
+	searched, err := db.SearchSkills(ctx, "demo", "acme", 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +172,7 @@ func TestSQLiteSkillRepositoryCompatibility(t *testing.T) {
 		t.Fatalf("unexpected search: %+v", searched)
 	}
 
-	curated, err := db.CuratedSkills(ctx)
+	curated, err := db.CuratedSkills(ctx, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +185,7 @@ func TestSQLiteSkillRepositoryCompatibility(t *testing.T) {
 	if err := db.UpsertSkill(ctx, skill); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := db.GetSkill(ctx, skill.ID)
+	updated, err := db.GetSkill(ctx, skill.ID, false)
 	if err != nil || updated.Stars != 99 || updated.SecurityScore != 10 {
 		t.Fatalf("upsert did not update skill: %+v, %v", updated, err)
 	}
@@ -105,7 +193,7 @@ func TestSQLiteSkillRepositoryCompatibility(t *testing.T) {
 	if err := db.DeleteSkill(ctx, skill.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.GetSkill(ctx, skill.ID); !errors.Is(err, model.ErrNotFound) {
+	if _, err := db.GetSkill(ctx, skill.ID, false); !errors.Is(err, model.ErrNotFound) {
 		t.Fatalf("GetSkill() error = %v, want ErrNotFound", err)
 	}
 }
@@ -182,6 +270,9 @@ func TestSQLiteAdminTokenRevocationAndDownloadStats(t *testing.T) {
 	if stats.TotalSkills != 2 || stats.TotalDownloads != 2 || stats.UniqueClients != 1 || len(stats.Skills) != 2 || len(stats.Skills[0].Clients) != 1 || stats.Skills[1].Downloads != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
+	if stats.Skills[0].QualityScore != skill.QualityScore {
+		t.Fatalf("stats quality score = %d, want %d", stats.Skills[0].QualityScore, skill.QualityScore)
+	}
 	client := stats.Skills[0].Clients[0]
 	if client.ID != keyID || client.Name != "analytics-client" || client.Downloads != 2 || client.FirstDownloadedAt.IsZero() || client.LastDownloadedAt.IsZero() {
 		t.Fatalf("unexpected client stats: %+v", client)
@@ -225,7 +316,7 @@ func testSkill() model.Skill {
 		ID: "acme/tools/demo", Slug: "demo", Name: "Demo Skill", Description: "A demo skill",
 		Source: "acme/tools", Installs: 42, Stars: 42, SourceType: "github",
 		InstallURL: "https://github.com/acme/tools", URL: "https://skills.exitmesh.com/acme/tools/demo",
-		SecurityScore: 9, Official: true, Hash: "abc123", UpdatedAt: now,
+		SecurityScore: 9, QualityScore: 8, LLMChecked: true, Official: true, Hash: "abc123", UpdatedAt: now,
 		Files: []model.File{{Path: "SKILL.md", Contents: "# Demo"}},
 		Audit: model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: "pass", Summary: "safe", AuditedAt: now, RiskLevel: "LOW", Categories: []string{"SAFE"}},
 	}

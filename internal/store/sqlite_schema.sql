@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS skills (
     public_url TEXT NOT NULL,
     is_duplicate INTEGER NOT NULL DEFAULT 0,
     security_score INTEGER NOT NULL CHECK (security_score BETWEEN 5 AND 10),
+    quality_score INTEGER NOT NULL CHECK (quality_score BETWEEN 5 AND 10),
+    llm_checked INTEGER NOT NULL DEFAULT 0,
     official INTEGER NOT NULL DEFAULT 0,
     content_hash TEXT NOT NULL,
     files TEXT NOT NULL DEFAULT '[]',
