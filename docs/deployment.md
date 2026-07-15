@@ -99,15 +99,15 @@ kubectl -n exitskills create secret generic exitskills-secrets \
   --from-literal=AI_API_KEY='YOUR_AI_API_KEY'
 ```
 
-Install a released image. Pin a versioned tag in production rather than `latest`:
+Install the published OCI Helm chart. Pin an explicit SemVer in production:
 
 ```sh
-helm upgrade --install exitskills deploy/helm/exitmesh-skills \
+helm upgrade --install exitskills oci://ghcr.io/cloud-exit/exitmesh-skills \
+  --version 0.2.0 \
   --namespace exitskills \
   --set fullnameOverride=exitskills \
   --set existingSecret=exitskills-secrets \
-  --set image.repository=ghcr.io/cloud-exit/exitskills \
-  --set image.tag=latest
+  --set image.tag=0.2.0
 ```
 
 Inspect the rollout, access the API locally, and create a client key using the bundled `admin` executable:

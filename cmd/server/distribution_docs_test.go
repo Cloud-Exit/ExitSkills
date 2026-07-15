@@ -38,6 +38,10 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"seccompProfile:",
 			"type: RuntimeDefault",
 		},
+		"../../deploy/helm/exitmesh-skills/Chart.yaml": {
+			"version: 0.2.0",
+			"appVersion: \"0.2.0\"",
+		},
 		"../../Makefile": {
 			"verify:",
 			"mod verify",
@@ -56,12 +60,17 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"steps.image.outputs.image",
 			"push: true",
 			"org.opencontainers.image.source=https://github.com/${{ github.repository }}",
+			"helm registry login",
+			"helm push",
+			"oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}",
 		},
 		"../../docs/deployment.md": {
 			"# Running ExitSkills",
 			"docker build",
 			"docker compose",
 			"helm upgrade --install",
+			"oci://ghcr.io/cloud-exit/exitmesh-skills",
+			"--version 0.2.0",
 			"--security-opt no-new-privileges",
 			"--cap-drop ALL",
 		},
@@ -81,6 +90,29 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			if !strings.Contains(string(contents), value) {
 				t.Errorf("%s is missing %q", filename, value)
 			}
+		}
+	}
+}
+
+func TestReleaseUsesSemanticVersions(t *testing.T) {
+	contents, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(contents)
+	for _, forbidden := range []string{"GITHUB_RUN_NUMBER", "date -u +%Y%m%d"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("release workflow contains date/run versioning %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"base_version=\"$(awk '$1 == \"version:\" { print $2; exit }' deploy/helm/exitmesh-skills/Chart.yaml)\"",
+		"^[0-9]+\\.[0-9]+\\.[0-9]+$",
+		"tag=v${version}",
+		"git tag --list \"v${release_line}.*\"",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("release workflow is missing semantic-version logic %q", required)
 		}
 	}
 }
