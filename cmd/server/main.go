@@ -1,0 +1,96 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/exitmesh/skills/internal/audit"
+	"github.com/exitmesh/skills/internal/auth"
+	"github.com/exitmesh/skills/internal/config"
+	githubclient "github.com/exitmesh/skills/internal/github"
+	"github.com/exitmesh/skills/internal/httpapi"
+	"github.com/exitmesh/skills/internal/indexer"
+	"github.com/exitmesh/skills/internal/scheduler"
+	"github.com/exitmesh/skills/internal/store"
+)
+
+var version = "dev"
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+	var logLevel slog.Level
+	if err := logLevel.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
+		logger.Error("invalid log level", "error", err)
+		os.Exit(1)
+	}
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("database startup failed", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		logger.Error("database migration failed", "error", err)
+		os.Exit(1)
+	}
+	keys, err := auth.NewKeyManager(cfg.EncryptionKey)
+	if err != nil {
+		logger.Error("key manager startup failed", "error", err)
+		os.Exit(1)
+	}
+	httpClient := &http.Client{Timeout: cfg.RequestTimeout}
+	githubAuth, err := githubAuthenticator(cfg, httpClient)
+	if err != nil {
+		logger.Error("github authentication startup failed", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("github authentication configured", "mode", githubAuth.Name())
+	source := githubclient.NewClientWithAuthenticator(cfg.GitHubAPIBaseURL, githubAuth, cfg.OfficialURL, httpClient).WithLogger(logger).WithConcurrency(cfg.IndexConcurrency)
+	auditor := audit.NewClient(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, httpClient)
+	worker := indexer.New(source, auditor, db, time.Now).WithPublicBaseURL(cfg.PublicBaseURL).WithLogger(logger).WithConcurrency(cfg.IndexConcurrency)
+	go scheduler.Run(ctx, cfg.IndexInterval, cfg.IndexOnStart, worker, logger)
+
+	handler := httpapi.NewHandler(db, auth.NewVerifier(keys, db), httpapi.NewLimiter(cfg.RateLimit, cfg.RateWindow), httpapi.WithAdmin(cfg.MasterToken, keys, db))
+	server := &http.Server{Addr: cfg.ListenAddress, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	go func() {
+		logger.Info("server listening", "address", cfg.ListenAddress, "version", version, "log_level", cfg.LogLevel, "index_concurrency", cfg.IndexConcurrency)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("HTTP server failed", "error", err)
+			stop()
+		}
+	}()
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("HTTP shutdown failed", "error", err)
+	}
+}
+
+func githubAuthenticator(cfg config.Config, _ *http.Client) (githubclient.RequestAuthenticator, error) {
+	switch cfg.GitHubAuthMode {
+	case "token":
+		return githubclient.NewTokenAuthenticator(cfg.GitHubToken), nil
+	case "oauth_app":
+		return githubclient.NewOAuthAppAuthenticator(cfg.GitHubClientID, cfg.GitHubClientSecret), nil
+	default:
+		return nil, fmt.Errorf("unsupported GitHub authentication mode %q", cfg.GitHubAuthMode)
+	}
+}

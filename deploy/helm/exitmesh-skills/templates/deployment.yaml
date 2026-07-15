@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "exitmesh-skills.fullname" . }}
+  labels:
+    {{- include "exitmesh-skills.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "exitmesh-skills.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exitmesh-skills.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "exitmesh-skills.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: skills
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: DATABASE_URL}}
+            - name: GITHUB_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: GITHUB_TOKEN, optional: true}}
+            - name: GITHUB_CLIENT_ID
+              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: GITHUB_CLIENT_ID, optional: true}}
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: GITHUB_CLIENT_SECRET, optional: true}}
+            - name: ENCRYPTION_KEY
+              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: ENCRYPTION_KEY}}
+            - name: MASTER_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: MASTER_TOKEN}}
+            - name: AI_API_KEY
+              valueFrom: {secretKeyRef: {name: {{ include "exitmesh-skills.secretName" . }}, key: AI_API_KEY, optional: true}}
+            - {name: LISTEN_ADDRESS, value: {{ .Values.config.listenAddress | quote }}}
+            - {name: PUBLIC_BASE_URL, value: {{ .Values.config.publicBaseUrl | quote }}}
+            - {name: AI_BASE_URL, value: {{ .Values.config.aiBaseUrl | quote }}}
+            - {name: AI_MODEL, value: {{ .Values.config.aiModel | quote }}}
+            - {name: GITHUB_API_BASE_URL, value: {{ .Values.config.githubApiBaseUrl | quote }}}
+            - {name: OFFICIAL_SKILLS_URL, value: {{ .Values.config.officialSkillsUrl | quote }}}
+            - {name: INDEX_INTERVAL, value: {{ .Values.config.indexInterval | quote }}}
+            - {name: INDEX_ON_START, value: {{ .Values.config.indexOnStart | quote }}}
+            - {name: INDEX_CONCURRENCY, value: {{ .Values.config.indexConcurrency | quote }}}
+            - {name: LOG_LEVEL, value: {{ .Values.config.logLevel | quote }}}
+            - {name: RATE_LIMIT_REQUESTS, value: {{ .Values.config.rateLimitRequests | quote }}}
+            - {name: RATE_LIMIT_WINDOW, value: {{ .Values.config.rateLimitWindow | quote }}}
+            - {name: REQUEST_TIMEOUT, value: {{ .Values.config.requestTimeout | quote }}}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

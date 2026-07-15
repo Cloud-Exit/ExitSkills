@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: azure/setup-helm@v4
+      - name: Choose version
+        id: version
+        shell: bash
+        run: |
+          version="v0.$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=${version#v}" >> "$GITHUB_OUTPUT"
+      - name: Test and build
+        run: |
+          make fmt-check vet test-race
+          make build VERSION="${{ steps.version.outputs.version }}"
+      - name: Package Helm chart
+        run: |
+          mkdir -p dist
+          helm lint deploy/helm/exitmesh-skills --set existingSecret=exitmesh-skills
+          helm package deploy/helm/exitmesh-skills \
+            --version "${{ steps.version.outputs.chart_version }}" \
+            --app-version "${{ steps.version.outputs.version }}" \
+            --destination dist
+          cp bin/server bin/admin dist/
+      - name: Publish container image
+        env:
+          REGISTRY: ghcr.io
+          IMAGE: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          image="${REGISTRY}/${IMAGE,,}"
+          docker build --build-arg VERSION="$VERSION" -t "$image:$VERSION" -t "$image:latest" .
+          docker push "$image:$VERSION"
+          docker push "$image:latest"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh release create "$VERSION" dist/* --target "$GITHUB_SHA" --generate-notes --title "$VERSION"
+

@@ -1,0 +1,233 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ExitMesh Skills API",
+    "version": "1.0.0",
+    "description": "A skills.sh-compatible, authenticated catalog of security-audited agent skills. Canonical routes use `/v1`; equivalent `/api/v1` aliases are also available."
+  },
+  "servers": [
+    {
+      "url": "https://skills.exitmesh.com",
+      "description": "ExitMesh production"
+    },
+    {
+      "url": "http://localhost:8111",
+      "description": "Local development"
+    }
+  ],
+  "tags": [
+    {"name": "Skills", "description": "Browse and inspect audited skills."},
+    {"name": "Admin", "description": "Master-token administration and usage analytics."},
+    {"name": "Health", "description": "Unauthenticated Kubernetes health probes."}
+  ],
+  "security": [{"ApiToken": []}],
+  "paths": {
+    "/v1/docs": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "View API documentation",
+        "operationId": "getApiDocs",
+        "security": [],
+        "responses": {
+          "200": {"description": "Redoc API reference", "content": {"text/html": {"schema": {"type": "string"}}}}
+        }
+      }
+    },
+    "/v1/skills": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "List skills",
+        "operationId": "listSkills",
+        "description": "Returns a zero-based paginated catalog. The master token is also accepted for bootstrap and diagnostics.",
+        "parameters": [
+          {"name": "view", "in": "query", "schema": {"type": "string", "enum": ["all-time", "trending", "hot"], "default": "all-time"}},
+          {"name": "page", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}},
+          {"name": "per_page", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "Catalog page", "headers": {"X-RateLimit-Limit": {"$ref": "#/components/headers/RateLimitLimit"}, "X-RateLimit-Remaining": {"$ref": "#/components/headers/RateLimitRemaining"}, "X-RateLimit-Reset": {"$ref": "#/components/headers/RateLimitReset"}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ListResponse"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "429": {"$ref": "#/components/responses/RateLimited"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/v1/skills/search": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "Search skills",
+        "operationId": "searchSkills",
+        "parameters": [
+          {"name": "q", "in": "query", "required": true, "schema": {"type": "string", "minLength": 2}},
+          {"name": "owner", "in": "query", "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}
+        ],
+        "responses": {
+          "200": {"description": "Search results", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchResponse"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "429": {"$ref": "#/components/responses/RateLimited"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/v1/skills/curated": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "List official skills by owner",
+        "operationId": "listCuratedSkills",
+        "responses": {
+          "200": {"description": "Official skills grouped by creator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CuratedResponse"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "429": {"$ref": "#/components/responses/RateLimited"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/v1/skills/{owner}/{repo}/{skill}": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "Download a skill snapshot",
+        "operationId": "getSkill",
+        "description": "Returns the stored files and content hash. A successful normal API-key request increments download analytics; master-token requests do not.",
+        "parameters": [
+          {"$ref": "#/components/parameters/Owner"},
+          {"$ref": "#/components/parameters/Repo"},
+          {"$ref": "#/components/parameters/Skill"}
+        ],
+        "responses": {
+          "200": {"description": "Skill snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SkillDetail"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/RateLimited"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/v1/skills/audit/{owner}/{repo}/{skill}": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "Get a skill security audit",
+        "operationId": "getSkillAudit",
+        "parameters": [
+          {"$ref": "#/components/parameters/Owner"},
+          {"$ref": "#/components/parameters/Repo"},
+          {"$ref": "#/components/parameters/Skill"}
+        ],
+        "responses": {
+          "200": {"description": "Security audit", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AuditResponse"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/RateLimited"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/v1/admin/token": {
+      "post": {
+        "tags": ["Admin"],
+        "summary": "Create an API token",
+        "operationId": "createApiToken",
+        "security": [{"MasterToken": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenCreateRequest"}}}},
+        "responses": {
+          "201": {"description": "Token created; the plaintext token is returned once", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenCreateResponse"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/MasterUnauthorized"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      },
+      "delete": {
+        "tags": ["Admin"],
+        "summary": "Revoke an API token",
+        "operationId": "revokeApiToken",
+        "security": [{"MasterToken": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenRevokeRequest"}}}},
+        "responses": {
+          "204": {"description": "Token revoked"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/MasterUnauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/v1/admin/stats": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "Get skill download statistics",
+        "operationId": "getAdminStats",
+        "description": "Returns every indexed skill, including zero-download skills, with aggregate and per-API-key usage. Tokens, authorization headers, and client IP addresses are not included.",
+        "security": [{"MasterToken": []}],
+        "responses": {
+          "200": {"description": "Skill usage statistics", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminStats"}}}},
+          "401": {"$ref": "#/components/responses/MasterUnauthorized"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Liveness probe",
+        "operationId": "healthz",
+        "security": [],
+        "responses": {"200": {"description": "Service is alive", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Health"}}}}}
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Readiness probe",
+        "operationId": "readyz",
+        "security": [],
+        "responses": {"200": {"description": "Service is ready", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Health"}}}}}
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiToken": {"type": "http", "scheme": "bearer", "bearerFormat": "em_sk_...", "description": "Generated ExitMesh API token. MASTER_TOKEN is also accepted on catalog endpoints."},
+      "MasterToken": {"type": "http", "scheme": "bearer", "description": "MASTER_TOKEN; required for all admin operations."}
+    },
+    "parameters": {
+      "Owner": {"name": "owner", "in": "path", "required": true, "schema": {"type": "string"}},
+      "Repo": {"name": "repo", "in": "path", "required": true, "schema": {"type": "string"}},
+      "Skill": {"name": "skill", "in": "path", "required": true, "schema": {"type": "string"}}
+    },
+    "headers": {
+      "RateLimitLimit": {"description": "Requests allowed per key and window", "schema": {"type": "integer"}},
+      "RateLimitRemaining": {"description": "Requests remaining in the current window", "schema": {"type": "integer"}},
+      "RateLimitReset": {"description": "Seconds until the current window resets", "schema": {"type": "integer"}}
+    },
+    "responses": {
+      "BadRequest": {"description": "Invalid request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "Unauthorized": {"description": "Missing, invalid, expired, or revoked API token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "MasterUnauthorized": {"description": "Missing or invalid master token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "NotFound": {"description": "Resource not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "RateLimited": {"description": "Per-key rate limit exceeded", "headers": {"Retry-After": {"description": "Seconds before retrying", "schema": {"type": "integer"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "Unavailable": {"description": "Temporary storage or service failure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+    },
+    "schemas": {
+      "Error": {"type": "object", "required": ["error", "message"], "properties": {"error": {"type": "string"}, "message": {"type": "string"}}},
+      "Health": {"type": "object", "required": ["status"], "properties": {"status": {"type": "string", "const": "ok"}}},
+      "File": {"type": "object", "required": ["path", "contents"], "properties": {"path": {"type": "string"}, "contents": {"type": "string"}}},
+      "Audit": {"type": "object", "required": ["provider", "slug", "status", "summary", "auditedAt"], "properties": {"provider": {"type": "string"}, "slug": {"type": "string"}, "status": {"type": "string", "enum": ["pass", "warn", "fail"]}, "summary": {"type": "string"}, "auditedAt": {"type": "string", "format": "date-time"}, "riskLevel": {"type": "string", "enum": ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]}, "categories": {"type": "array", "items": {"type": "string"}}}},
+      "Skill": {"type": "object", "required": ["id", "slug", "name", "source", "installs", "sourceType", "installUrl", "url", "securityScore"], "properties": {"id": {"type": "string"}, "slug": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"}, "source": {"type": "string"}, "installs": {"type": "integer", "minimum": 0}, "stars": {"type": "integer", "minimum": 11}, "sourceType": {"type": "string", "const": "github"}, "installUrl": {"type": "string", "format": "uri"}, "url": {"type": "string", "format": "uri"}, "isDuplicate": {"type": "boolean"}, "securityScore": {"type": "integer", "minimum": 5, "maximum": 10}, "official": {"type": "boolean"}, "installsYesterday": {"type": "integer"}, "change": {"type": "integer"}}},
+      "Pagination": {"type": "object", "required": ["page", "perPage", "total", "hasMore"], "properties": {"page": {"type": "integer", "minimum": 0}, "perPage": {"type": "integer", "minimum": 1}, "total": {"type": "integer", "minimum": 0}, "hasMore": {"type": "boolean"}}},
+      "ListResponse": {"type": "object", "required": ["data", "pagination"], "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/Skill"}}, "pagination": {"$ref": "#/components/schemas/Pagination"}}},
+      "SearchResponse": {"type": "object", "required": ["data", "query", "searchType", "count", "durationMs"], "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/Skill"}}, "query": {"type": "string"}, "searchType": {"type": "string", "enum": ["fuzzy", "semantic"]}, "count": {"type": "integer", "minimum": 0}, "durationMs": {"type": "integer", "minimum": 0}}},
+      "CuratedOwner": {"type": "object", "required": ["owner", "totalInstalls", "featuredRepo", "featuredSkill", "skills"], "properties": {"owner": {"type": "string"}, "totalInstalls": {"type": "integer", "minimum": 0}, "featuredRepo": {"type": "string"}, "featuredSkill": {"type": "string"}, "skills": {"type": "array", "items": {"$ref": "#/components/schemas/Skill"}}}},
+      "CuratedResponse": {"type": "object", "required": ["data", "totalOwners", "totalSkills", "generatedAt"], "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/CuratedOwner"}}, "totalOwners": {"type": "integer", "minimum": 0}, "totalSkills": {"type": "integer", "minimum": 0}, "generatedAt": {"type": "string", "format": "date-time"}}},
+      "SkillDetail": {"type": "object", "required": ["id", "source", "slug", "installs", "hash", "files", "securityScore"], "properties": {"id": {"type": "string"}, "source": {"type": "string"}, "slug": {"type": "string"}, "installs": {"type": "integer", "minimum": 0}, "hash": {"type": "string"}, "files": {"type": "array", "items": {"$ref": "#/components/schemas/File"}}, "securityScore": {"type": "integer", "minimum": 5, "maximum": 10}}},
+      "AuditResponse": {"type": "object", "required": ["id", "source", "slug", "audits", "securityScore"], "properties": {"id": {"type": "string"}, "source": {"type": "string"}, "slug": {"type": "string"}, "audits": {"type": "array", "items": {"$ref": "#/components/schemas/Audit"}}, "securityScore": {"type": "integer", "minimum": 5, "maximum": 10}}},
+      "TokenCreateRequest": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 100}, "validFor": {"type": "string", "default": "720h", "examples": ["24h", "720h"]}}},
+      "TokenCreateResponse": {"type": "object", "required": ["id", "name", "expiresAt", "token"], "properties": {"id": {"type": "string", "pattern": "^key_"}, "name": {"type": "string"}, "expiresAt": {"type": "string", "format": "date-time"}, "token": {"type": "string", "pattern": "^em_sk_"}}},
+      "TokenRevokeRequest": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string", "pattern": "^key_"}}},
+      "ClientStats": {"type": "object", "required": ["id", "name", "downloads", "firstDownloadedAt", "lastDownloadedAt"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "downloads": {"type": "integer", "minimum": 0}, "firstDownloadedAt": {"type": "string", "format": "date-time"}, "lastDownloadedAt": {"type": "string", "format": "date-time"}}},
+      "SkillStats": {"type": "object", "required": ["id", "name", "source", "slug", "securityScore", "downloads", "uniqueClients", "clients"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "source": {"type": "string"}, "slug": {"type": "string"}, "securityScore": {"type": "integer", "minimum": 5, "maximum": 10}, "downloads": {"type": "integer", "minimum": 0}, "uniqueClients": {"type": "integer", "minimum": 0}, "lastDownloadedAt": {"type": ["string", "null"], "format": "date-time"}, "clients": {"type": "array", "items": {"$ref": "#/components/schemas/ClientStats"}}}},
+      "AdminStats": {"type": "object", "required": ["generatedAt", "totalSkills", "totalDownloads", "uniqueClients", "skills"], "properties": {"generatedAt": {"type": "string", "format": "date-time"}, "totalSkills": {"type": "integer", "minimum": 0}, "totalDownloads": {"type": "integer", "minimum": 0}, "uniqueClients": {"type": "integer", "minimum": 0}, "skills": {"type": "array", "items": {"$ref": "#/components/schemas/SkillStats"}}}}
+    }
+  }
+}
