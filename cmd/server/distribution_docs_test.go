@@ -84,3 +84,13 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerBuildUsesSourcesAlreadyValidatedByReleaseCI(t *testing.T) {
+	contents, err := os.ReadFile("../../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(contents), "go test ./...") {
+		t.Fatal("Dockerfile reruns repository tests even though .dockerignore excludes distribution test fixtures")
+	}
+}
