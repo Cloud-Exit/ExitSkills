@@ -10,6 +10,7 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 	files := map[string][]string{
 		"../../Dockerfile": {
 			"alpine:latest",
+			"ENV GOMEMLIMIT=384MiB",
 			"golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2",
 			"alpine:latest@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
 			"org.opencontainers.image.source",
@@ -27,6 +28,7 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"postgres:18-alpine",
 			"postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
 			"GITHUB_CLIENT_ID",
+			"GOMEMLIMIT: ${GOMEMLIMIT:-384MiB}",
 			"GITHUB_CLIENT_SECRET",
 			"127.0.0.1:${EXITSKILLS_PORT:-8111}:8080",
 			"read_only: true",
@@ -35,6 +37,7 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 		},
 		"../../deploy/helm/exitskills/values.yaml": {
 			"repository: ghcr.io/cloud-exit/exitskills",
+			"goMemoryLimit: \"384MiB\"",
 			"seccompProfile:",
 			"type: RuntimeDefault",
 		},
@@ -42,6 +45,10 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"name: exitskills",
 			"version: 0.2.0",
 			"appVersion: \"0.2.0\"",
+		},
+		"../../deploy/helm/exitskills/templates/deployment.yaml": {
+			"name: GOMEMLIMIT",
+			"value: {{ .Values.config.goMemoryLimit | quote }}",
 		},
 		"../../Makefile": {
 			"verify:",

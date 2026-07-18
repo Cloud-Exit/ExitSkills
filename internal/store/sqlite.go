@@ -250,13 +250,56 @@ func (s *SQLite) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[strin
 	}
 	return ids, rows.Err()
 }
-func (s *SQLite) UnassessedSkills(ctx context.Context) ([]model.Skill, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM skills WHERE llm_checked=0 ORDER BY id`)
+func (s *SQLite) UnassessedSkillCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM skills WHERE llm_checked=0`).Scan(&count)
+	return count, err
+}
+
+func (s *SQLite) UnassessedSkills(ctx context.Context, limit int) ([]model.PendingSkillAssessment, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT skills.id, COALESCE((
+    SELECT json_extract(file.value, '$.contents')
+    FROM json_each(skills.files) AS file
+    WHERE json_extract(file.value, '$.path') IN ('SKILL.md', 'SKILLS.md')
+    ORDER BY CASE json_extract(file.value, '$.path') WHEN 'SKILL.md' THEN 0 ELSE 1 END
+    LIMIT 1
+), '')
+FROM skills WHERE llm_checked=0 ORDER BY skills.id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanSQLiteSkills(rows)
+	pending := make([]model.PendingSkillAssessment, 0, limit)
+	for rows.Next() {
+		var skill model.PendingSkillAssessment
+		if err := rows.Scan(&skill.ID, &skill.Contents); err != nil {
+			return nil, err
+		}
+		pending = append(pending, skill)
+	}
+	return pending, rows.Err()
+}
+
+func (s *SQLite) UpdateSkillAssessment(ctx context.Context, id string, securityScore, qualityScore int, skillAudit model.Audit, updatedAt time.Time) error {
+	categories, err := json.Marshal(skillAudit.Categories)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE skills SET security_score=?, quality_score=?, llm_checked=1,
+audit_provider=?, audit_slug=?, audit_status=?, audit_summary=?, audit_risk_level=?, audit_categories=?, audited_at=?, updated_at=?
+WHERE id=? AND llm_checked=0`, securityScore, qualityScore, skillAudit.Provider, skillAudit.Slug, skillAudit.Status, skillAudit.Summary,
+		skillAudit.RiskLevel, categories, skillAudit.AuditedAt, updatedAt, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return model.ErrNotFound
+	}
+	return nil
 }
 
 func (s *SQLite) CuratedSkills(ctx context.Context, llmCheckedOnly bool) ([]model.Skill, error) {

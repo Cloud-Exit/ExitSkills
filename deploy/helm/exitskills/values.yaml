@@ -40,6 +40,8 @@ resources:
 
 config:
   listenAddress: ":8080"
+  # Leave headroom below the default 512 MiB container limit.
+  goMemoryLimit: "384MiB"
   publicBaseUrl: "https://skills.exitmesh.com"
   # Set both values to enable the boot-time and indexing LLM gate.
   aiBaseUrl: ""

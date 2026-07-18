@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,11 +88,11 @@ func TestSQLiteMigrationAddsAssessmentStateToExistingCatalog(t *testing.T) {
 	if err := db.UpsertSkill(ctx, legacySkill); err != nil {
 		t.Fatal(err)
 	}
-	unchecked, err := db.UnassessedSkills(ctx)
+	unchecked, err := db.UnassessedSkills(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(unchecked) != 1 || unchecked[0].ID != legacySkill.ID || unchecked[0].LLMChecked {
+	if len(unchecked) != 1 || unchecked[0].ID != legacySkill.ID {
 		t.Fatalf("unchecked legacy skills = %+v", unchecked)
 	}
 	listed, total, err := db.ListSkills(ctx, model.ListOptions{PerPage: 10})
@@ -124,6 +125,55 @@ func TestSQLiteMigrationAddsAssessmentStateToExistingCatalog(t *testing.T) {
 	}
 	if len(curated) != 0 {
 		t.Fatalf("AI-enforced curated catalog exposed unchecked skill: %+v", curated)
+	}
+}
+
+func TestSQLiteLoadsCompactUncheckedSkillBatches(t *testing.T) {
+	db := openTestSQLite(t)
+	ctx := context.Background()
+	for position := range 12 {
+		skill := testSkill()
+		skill.ID = fmt.Sprintf("org/repo/skill-%02d", position)
+		skill.Slug = fmt.Sprintf("skill-%02d", position)
+		skill.LLMChecked = false
+		skill.Files = []model.File{
+			{Path: "SKILL.md", Contents: skill.ID},
+			{Path: "large-reference.md", Contents: strings.Repeat("x", 256<<10)},
+		}
+		if err := db.UpsertSkill(ctx, skill); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count, err := db.UnassessedSkillCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 12 {
+		t.Fatalf("unchecked count = %d, want 12", count)
+	}
+	pending, err := db.UnassessedSkills(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 10 {
+		t.Fatalf("unchecked batch = %d, want 10", len(pending))
+	}
+	for _, skill := range pending {
+		if skill.Contents != skill.ID {
+			t.Fatalf("pending skill %q loaded unexpected content", skill.ID)
+		}
+	}
+	now := time.Unix(1_800_000_000, 0).UTC()
+	skillAudit := model.Audit{Provider: "test", Slug: "test", Status: "pass", Summary: "checked", RiskLevel: "LOW", AuditedAt: now}
+	if err := db.UpdateSkillAssessment(ctx, pending[0].ID, 9, 8, skillAudit, now); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.GetSkill(ctx, pending[0].ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.LLMChecked || updated.SecurityScore != 9 || updated.QualityScore != 8 || len(updated.Files) != 2 {
+		t.Fatalf("updated compact assessment = %+v", updated)
 	}
 }
 

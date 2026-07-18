@@ -13,6 +13,7 @@ ARG VERSION=dev
 ARG SOURCE=https://github.com/Cloud-Exit/ExitSkills
 LABEL org.opencontainers.image.source="$SOURCE" \
       org.opencontainers.image.version="$VERSION"
+ENV GOMEMLIMIT=384MiB
 RUN addgroup -S -g 10001 app && adduser -S -D -H -u 10001 -G app app && \
     mkdir -p /data && chown 10001:10001 /data
 COPY --from=builder /out/server /usr/local/bin/server

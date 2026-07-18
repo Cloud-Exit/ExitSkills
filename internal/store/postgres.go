@@ -127,13 +127,52 @@ func (p *Postgres) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[str
 	}
 	return ids, rows.Err()
 }
-func (p *Postgres) UnassessedSkills(ctx context.Context) ([]model.Skill, error) {
-	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE llm_checked=FALSE ORDER BY id`)
+func (p *Postgres) UnassessedSkillCount(ctx context.Context) (int, error) {
+	var count int
+	err := p.pool.QueryRow(ctx, `SELECT count(*) FROM skills WHERE llm_checked=FALSE`).Scan(&count)
+	return count, err
+}
+
+func (p *Postgres) UnassessedSkills(ctx context.Context, limit int) ([]model.PendingSkillAssessment, error) {
+	rows, err := p.pool.Query(ctx, `SELECT skills.id, COALESCE((
+    SELECT file->>'contents'
+    FROM jsonb_array_elements(skills.files) AS file
+    WHERE file->>'path' IN ('SKILL.md', 'SKILLS.md')
+    ORDER BY CASE file->>'path' WHEN 'SKILL.md' THEN 0 ELSE 1 END
+    LIMIT 1
+), '')
+FROM skills WHERE llm_checked=FALSE ORDER BY skills.id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanPostgresSkills(rows)
+	pending := make([]model.PendingSkillAssessment, 0, limit)
+	for rows.Next() {
+		var skill model.PendingSkillAssessment
+		if err := rows.Scan(&skill.ID, &skill.Contents); err != nil {
+			return nil, err
+		}
+		pending = append(pending, skill)
+	}
+	return pending, rows.Err()
+}
+
+func (p *Postgres) UpdateSkillAssessment(ctx context.Context, id string, securityScore, qualityScore int, skillAudit model.Audit, updatedAt time.Time) error {
+	categories, err := json.Marshal(skillAudit.Categories)
+	if err != nil {
+		return err
+	}
+	result, err := p.pool.Exec(ctx, `UPDATE skills SET security_score=$1, quality_score=$2, llm_checked=TRUE,
+audit_provider=$3, audit_slug=$4, audit_status=$5, audit_summary=$6, audit_risk_level=$7, audit_categories=$8,
+audited_at=$9, updated_at=$10 WHERE id=$11 AND llm_checked=FALSE`, securityScore, qualityScore, skillAudit.Provider,
+		skillAudit.Slug, skillAudit.Status, skillAudit.Summary, skillAudit.RiskLevel, categories, skillAudit.AuditedAt, updatedAt, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return model.ErrNotFound
+	}
+	return nil
 }
 func (p *Postgres) CuratedSkills(ctx context.Context, llmCheckedOnly bool) ([]model.Skill, error) {
 	rows, err := p.pool.Query(ctx, `SELECT `+columns+` FROM skills WHERE official=TRUE AND quality_score IS NOT NULL AND (NOT $1 OR llm_checked=TRUE) ORDER BY source, stars DESC, id`, llmCheckedOnly)

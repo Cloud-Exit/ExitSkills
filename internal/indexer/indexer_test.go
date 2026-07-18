@@ -21,6 +21,30 @@ type fakeSource struct{ candidates []Candidate }
 
 func (f fakeSource) Discover(context.Context) ([]Candidate, error) { return f.candidates, nil }
 
+type boundedStreamingSource struct {
+	total       int
+	storedCount func() int
+}
+
+func (boundedStreamingSource) Discover(context.Context) ([]Candidate, error) {
+	return nil, errors.New("unbounded discovery path used")
+}
+
+func (source boundedStreamingSource) DiscoverStream(_ context.Context, _ map[string]struct{}, yield func(Candidate) error) error {
+	for position := range source.total {
+		if position > 0 && position%10 == 0 {
+			if stored := source.storedCount(); stored != position {
+				return fmt.Errorf("discovery continued after %d candidates with only %d stored", position, stored)
+			}
+		}
+		id := fmt.Sprintf("org/repo/skill-%d", position)
+		if err := yield(Candidate{ID: id, Source: "org/repo", Slug: fmt.Sprintf("skill-%d", position), Name: id, Stars: 11, Contents: id}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type fakeAuditor struct {
 	scores        map[string]int
 	qualityScores map[string]int
@@ -52,6 +76,7 @@ type fakeStore struct {
 	fresh      map[string]struct{}
 	unassessed []model.Skill
 	cutoff     time.Time
+	batchLoads []int
 }
 
 func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
@@ -83,6 +108,12 @@ func (f *fakeStore) DeleteSkill(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, id)
+	for position, skill := range f.unassessed {
+		if skill.ID == id {
+			f.unassessed = append(f.unassessed[:position], f.unassessed[position+1:]...)
+			break
+		}
+	}
 	return nil
 }
 func (f *fakeStore) FreshSkillIDs(_ context.Context, cutoff time.Time) (map[string]struct{}, error) {
@@ -91,10 +122,87 @@ func (f *fakeStore) FreshSkillIDs(_ context.Context, cutoff time.Time) (map[stri
 	f.mu.Unlock()
 	return f.fresh, nil
 }
-func (f *fakeStore) UnassessedSkills(context.Context) ([]model.Skill, error) {
+func (f *fakeStore) UnassessedSkillCount(context.Context) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]model.Skill(nil), f.unassessed...), nil
+	count := 0
+	for _, skill := range f.unassessed {
+		if !skill.LLMChecked {
+			count++
+		}
+	}
+	return count, nil
+}
+func (f *fakeStore) UnassessedSkills(_ context.Context, limit int) ([]model.PendingSkillAssessment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.batchLoads = append(f.batchLoads, len(f.upserted)+len(f.deleted))
+	pending := make([]model.PendingSkillAssessment, 0, limit)
+	for _, skill := range f.unassessed {
+		if skill.LLMChecked {
+			continue
+		}
+		contents, _ := primarySkillContents(skill.Files)
+		pending = append(pending, model.PendingSkillAssessment{ID: skill.ID, Contents: contents})
+		if len(pending) == limit {
+			break
+		}
+	}
+	return pending, nil
+}
+func (f *fakeStore) UpdateSkillAssessment(_ context.Context, id string, securityScore, qualityScore int, skillAudit model.Audit, updatedAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for position := range f.unassessed {
+		skill := &f.unassessed[position]
+		if skill.ID != id {
+			continue
+		}
+		skill.SecurityScore = securityScore
+		skill.QualityScore = qualityScore
+		skill.LLMChecked = true
+		skill.Audit = skillAudit
+		skill.UpdatedAt = updatedAt
+		f.upserted = append(f.upserted, *skill)
+		return nil
+	}
+	return model.ErrNotFound
+}
+
+func TestRunFlushesEveryTenStreamedCandidatesBeforeDiscoveryContinues(t *testing.T) {
+	store := &fakeStore{}
+	source := boundedStreamingSource{total: 25, storedCount: func() int {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		return len(store.upserted)
+	}}
+	stats, err := New(source, nil, store, time.Now).WithConcurrency(8).Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Discovered != 25 || stats.Stored != 25 {
+		t.Fatalf("stats = %+v, want 25 candidates discovered and stored", stats)
+	}
+}
+
+func TestReconcileLoadsAndStoresUncheckedSkillsInBatchesOfTen(t *testing.T) {
+	store := &fakeStore{}
+	for position := range 25 {
+		id := fmt.Sprintf("org/repo/legacy-%d", position)
+		store.unassessed = append(store.unassessed, model.Skill{
+			ID: id, Source: "org/repo", Slug: fmt.Sprintf("legacy-%d", position), Name: id, Stars: 11,
+			Files: []model.File{{Path: "SKILL.md", Contents: id}},
+		})
+	}
+	if err := New(fakeSource{}, &recordingAuditor{}, store, time.Now).Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(store.batchLoads, []int{0, 10, 20}) {
+		t.Fatalf("batch loads happened after processed counts %v, want [0 10 20]", store.batchLoads)
+	}
+	if len(store.upserted) != 25 {
+		t.Fatalf("assessed skills = %d, want 25", len(store.upserted))
+	}
 }
 
 func TestRunPublishesWithoutLLMWhenAssessmentIsDisabled(t *testing.T) {

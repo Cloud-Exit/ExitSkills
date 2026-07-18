@@ -27,6 +27,7 @@ const maxPopularRepositoryPages = 10
 const rankedSkillRepositoryQuery = "(SKILL.md OR SKILLS.md) in:readme stars:>10"
 const maxSkillFiles = 64
 const maxFileBytes = 512 << 10
+const maxSkillTotalBytes = 4 << 20
 const maxRateLimitRetries = 3
 
 type rateGate struct {
@@ -120,37 +121,52 @@ type treeItem struct {
 }
 
 func (c *Client) Discover(ctx context.Context) ([]indexer.Candidate, error) {
-	return c.discover(ctx, nil)
+	return c.collect(ctx, nil)
 }
 
 func (c *Client) DiscoverSkipping(ctx context.Context, freshIDs map[string]struct{}) ([]indexer.Candidate, error) {
-	return c.discover(ctx, freshIDs)
+	return c.collect(ctx, freshIDs)
 }
 
-func (c *Client) discover(ctx context.Context, freshIDs map[string]struct{}) ([]indexer.Candidate, error) {
+func (c *Client) collect(ctx context.Context, freshIDs map[string]struct{}) ([]indexer.Candidate, error) {
+	candidates := make([]indexer.Candidate, 0)
+	err := c.DiscoverStream(ctx, freshIDs, func(candidate indexer.Candidate) error {
+		candidates = append(candidates, candidate)
+		return nil
+	})
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	return candidates, err
+}
+
+func (c *Client) DiscoverStream(ctx context.Context, freshIDs map[string]struct{}, yield func(indexer.Candidate) error) error {
 	c.logger.Info("official catalog loading")
 	catalog, err := c.loadOfficialCatalog(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("load official skills: %w", err)
+		return fmt.Errorf("load official skills: %w", err)
 	}
 	officialOwners := catalog.Owners
 	c.logger.Info("official catalog loaded", "owners", len(officialOwners), "repositories", len(catalog.Repositories))
 	seen := map[string]bool{}
-	candidates := make([]indexer.Candidate, 0)
-	duplicates, contentFailures, filenameMismatches, freshSkipped := 0, 0, 0, 0
-	officialCandidates, officialDuplicates, officialFailures, officialFresh, err := c.discoverOfficialRepositories(ctx, catalog.Repositories, freshIDs, officialOwners, seen)
-	if err != nil {
-		return nil, err
+	discovered, official := 0, 0
+	emit := func(candidate indexer.Candidate) error {
+		discovered++
+		if candidate.Official {
+			official++
+		}
+		return yield(candidate)
 	}
-	candidates = append(candidates, officialCandidates...)
+	duplicates, contentFailures, filenameMismatches, freshSkipped := 0, 0, 0, 0
+	officialCandidates, officialDuplicates, officialFailures, officialFresh, err := c.discoverOfficialRepositories(ctx, catalog.Repositories, freshIDs, officialOwners, seen, emit)
+	if err != nil {
+		return err
+	}
 	duplicates += officialDuplicates
 	contentFailures += officialFailures
 	freshSkipped += officialFresh
-	popularCandidates, popularDuplicates, popularFailures, popularFresh, err := c.discoverPopularRepositories(ctx, freshIDs, officialOwners, seen)
+	popularCandidates, popularDuplicates, popularFailures, popularFresh, err := c.discoverPopularRepositories(ctx, freshIDs, officialOwners, seen, emit)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	candidates = append(candidates, popularCandidates...)
 	duplicates += popularDuplicates
 	contentFailures += popularFailures
 	freshSkipped += popularFresh
@@ -160,10 +176,10 @@ func (c *Client) discover(ctx context.Context, freshIDs map[string]struct{}) ([]
 			var result searchResponse
 			query := url.Values{"q": {"filename:" + filename}, "per_page": {"100"}, "page": {fmt.Sprint(pageNumber)}}
 			if err := c.getJSON(ctx, c.baseURL+"/search/code?"+query.Encode(), &result); err != nil {
-				return nil, fmt.Errorf("search GitHub code: %w", err)
+				return fmt.Errorf("search GitHub code: %w", err)
 			}
 			c.logger.Info("github skill search page", "filename", filename, "page", pageNumber, "results", len(result.Items), "total", result.TotalCount, "incomplete", result.Incomplete)
-			candidatesBeforePage := len(candidates)
+			candidatesBeforePage := discovered
 			pageItems := make([]searchItem, 0, len(result.Items))
 			for _, item := range result.Items {
 				if path.Base(item.Path) != filename {
@@ -180,33 +196,27 @@ func (c *Client) discover(ctx context.Context, freshIDs map[string]struct{}) ([]
 				seen[key] = true
 				if _, fresh := freshIDs[id]; fresh {
 					freshSkipped++
-					candidates = append(candidates, indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true})
+					if err := emit(indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true}); err != nil {
+						return err
+					}
 					c.logger.Debug("skill skipped before content download", "skill_id", id, "path", folder, "reason", "fresh")
 					continue
 				}
 				pageItems = append(pageItems, item)
 			}
-			pageCandidates, failures, err := c.fetchCandidates(ctx, pageItems, officialOwners, filename, pageNumber)
+			_, failures, err := c.fetchCandidates(ctx, pageItems, officialOwners, filename, pageNumber, emit)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			contentFailures += failures
-			candidates = append(candidates, pageCandidates...)
-			c.logger.Info("github skill search page processed", "filename", filename, "page", pageNumber, "new_candidates", len(candidates)-candidatesBeforePage, "candidates", len(candidates), "skipped_fresh", freshSkipped, "filename_mismatches", filenameMismatches, "duplicates", duplicates, "content_failures", contentFailures)
+			c.logger.Info("github skill search page processed", "filename", filename, "page", pageNumber, "new_candidates", discovered-candidatesBeforePage, "candidates", discovered, "skipped_fresh", freshSkipped, "filename_mismatches", filenameMismatches, "duplicates", duplicates, "content_failures", contentFailures)
 			if len(result.Items) < 100 || pageNumber*100 >= result.TotalCount {
 				break
 			}
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
-	official := 0
-	for _, candidate := range candidates {
-		if candidate.Official {
-			official++
-		}
-	}
-	c.logger.Info("github skill discovery complete", "candidates", len(candidates), "official", official, "skipped_fresh", freshSkipped, "filename_mismatches", filenameMismatches, "duplicates", duplicates, "content_failures", contentFailures)
-	return candidates, nil
+	c.logger.Info("github skill discovery complete", "candidates", discovered, "official", official, "official_repository_candidates", officialCandidates, "popular_repository_candidates", popularCandidates, "skipped_fresh", freshSkipped, "filename_mismatches", filenameMismatches, "duplicates", duplicates, "content_failures", contentFailures)
+	return nil
 }
 
 type repositoryMetadataResult struct {
@@ -216,24 +226,24 @@ type repositoryMetadataResult struct {
 	err        error
 }
 
-func (c *Client) discoverOfficialRepositories(ctx context.Context, names []string, freshIDs map[string]struct{}, officialOwners map[string]bool, seen map[string]bool) ([]indexer.Candidate, int, int, int, error) {
+func (c *Client) discoverOfficialRepositories(ctx context.Context, names []string, freshIDs map[string]struct{}, officialOwners map[string]bool, seen map[string]bool, yield func(indexer.Candidate) error) (int, int, int, int, error) {
 	if len(names) == 0 {
 		c.logger.Warn("official catalog contained no repository identities; continuing with ranked and code search")
-		return nil, 0, 0, 0, nil
+		return 0, 0, 0, 0, nil
 	}
 	c.logger.Info("official repository discovery started", "repositories", len(names), "minimum_stars", 11)
 	repositories, metadataFailures, lowStars, err := c.fetchRepositoryMetadata(ctx, names)
 	if err != nil {
-		return nil, 0, metadataFailures, 0, err
+		return 0, 0, metadataFailures, 0, err
 	}
 	c.logger.Info("official repository metadata loaded", "eligible", len(repositories), "skipped_stars", lowStars, "failures", metadataFailures)
 	items, treeFailures, err := c.fetchRepositorySkillItems(ctx, repositories, "official", 1)
 	if err != nil {
-		return nil, 0, metadataFailures + treeFailures, 0, err
+		return 0, 0, metadataFailures + treeFailures, 0, err
 	}
 	duplicates, freshSkipped := 0, 0
 	pageItems := make([]searchItem, 0, len(items))
-	candidates := make([]indexer.Candidate, 0, len(items))
+	candidates := 0
 	for _, item := range items {
 		folder, slug, id, owner := candidateIdentity(item)
 		if seen[id] {
@@ -243,19 +253,22 @@ func (c *Client) discoverOfficialRepositories(ctx context.Context, names []strin
 		seen[id] = true
 		if _, fresh := freshIDs[id]; fresh {
 			freshSkipped++
-			candidates = append(candidates, indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true})
+			if err := yield(indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true}); err != nil {
+				return candidates, duplicates, metadataFailures + treeFailures, freshSkipped, err
+			}
+			candidates++
 			c.logger.Debug("skill skipped before content download", "skill_id", id, "path", folder, "reason", "fresh")
 			continue
 		}
 		pageItems = append(pageItems, item)
 	}
-	pageCandidates, contentFailures, err := c.fetchCandidates(ctx, pageItems, officialOwners, "official", 1)
+	pageCandidates, contentFailures, err := c.fetchCandidates(ctx, pageItems, officialOwners, "official", 1, yield)
 	if err != nil {
-		return nil, duplicates, metadataFailures + treeFailures + contentFailures, freshSkipped, err
+		return candidates, duplicates, metadataFailures + treeFailures + contentFailures, freshSkipped, err
 	}
-	candidates = append(candidates, pageCandidates...)
+	candidates += pageCandidates
 	failures := metadataFailures + treeFailures + contentFailures
-	c.logger.Info("official repository discovery complete", "repositories", len(repositories), "skill_files", len(items), "candidates", len(candidates), "skipped_stars", lowStars, "skipped_fresh", freshSkipped, "duplicates", duplicates, "failures", failures)
+	c.logger.Info("official repository discovery complete", "repositories", len(repositories), "skill_files", len(items), "candidates", candidates, "skipped_stars", lowStars, "skipped_fresh", freshSkipped, "duplicates", duplicates, "failures", failures)
 	return candidates, duplicates, failures, freshSkipped, nil
 }
 
@@ -320,16 +333,16 @@ func (c *Client) fetchRepositoryMetadata(ctx context.Context, names []string) ([
 	return repositories, failures, lowStars, nil
 }
 
-func (c *Client) discoverPopularRepositories(ctx context.Context, freshIDs map[string]struct{}, officialOwners map[string]bool, seen map[string]bool) ([]indexer.Candidate, int, int, int, error) {
+func (c *Client) discoverPopularRepositories(ctx context.Context, freshIDs map[string]struct{}, officialOwners map[string]bool, seen map[string]bool, yield func(indexer.Candidate) error) (int, int, int, int, error) {
 	c.logger.Info("popular repository discovery started", "query", rankedSkillRepositoryQuery, "minimum_stars", 11, "max_pages", maxPopularRepositoryPages)
-	candidates := make([]indexer.Candidate, 0)
+	candidates := 0
 	duplicates, contentFailures, freshSkipped := 0, 0, 0
 	for pageNumber := 1; pageNumber <= maxPopularRepositoryPages; pageNumber++ {
 		var result repositorySearchResponse
 		query := url.Values{"q": {rankedSkillRepositoryQuery}, "sort": {"stars"}, "order": {"desc"}, "per_page": {"100"}, "page": {fmt.Sprint(pageNumber)}}
 		if err := c.getJSON(ctx, c.baseURL+"/search/repositories?"+query.Encode(), &result); err != nil {
 			if requestMustAbort(ctx, err) {
-				return nil, duplicates, contentFailures, freshSkipped, err
+				return candidates, duplicates, contentFailures, freshSkipped, err
 			}
 			c.logger.Warn("popular repository discovery unavailable; continuing with code search", "page", pageNumber, "error", err)
 			break
@@ -337,7 +350,7 @@ func (c *Client) discoverPopularRepositories(ctx context.Context, freshIDs map[s
 		c.logger.Info("popular repository search page", "page", pageNumber, "repositories", len(result.Items), "total", result.TotalCount)
 		items, treeFailures, err := c.fetchRepositorySkillItems(ctx, result.Items, "popular", pageNumber)
 		if err != nil {
-			return nil, duplicates, contentFailures, freshSkipped, err
+			return candidates, duplicates, contentFailures, freshSkipped, err
 		}
 		contentFailures += treeFailures
 		pageItems := make([]searchItem, 0, len(items))
@@ -350,24 +363,27 @@ func (c *Client) discoverPopularRepositories(ctx context.Context, freshIDs map[s
 			seen[id] = true
 			if _, fresh := freshIDs[id]; fresh {
 				freshSkipped++
-				candidates = append(candidates, indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true})
+				if err := yield(indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true}); err != nil {
+					return candidates, duplicates, contentFailures, freshSkipped, err
+				}
+				candidates++
 				c.logger.Debug("skill skipped before content download", "skill_id", id, "path", folder, "reason", "fresh")
 				continue
 			}
 			pageItems = append(pageItems, item)
 		}
-		pageCandidates, failures, err := c.fetchCandidates(ctx, pageItems, officialOwners, "popular", pageNumber)
+		pageCandidates, failures, err := c.fetchCandidates(ctx, pageItems, officialOwners, "popular", pageNumber, yield)
 		if err != nil {
-			return nil, duplicates, contentFailures, freshSkipped, err
+			return candidates, duplicates, contentFailures, freshSkipped, err
 		}
 		contentFailures += failures
-		candidates = append(candidates, pageCandidates...)
-		c.logger.Info("popular repository page processed", "page", pageNumber, "skill_files", len(items), "new_candidates", len(pageCandidates), "candidates", len(candidates), "tree_failures", treeFailures, "content_failures", contentFailures, "duplicates", duplicates, "skipped_fresh", freshSkipped)
+		candidates += pageCandidates
+		c.logger.Info("popular repository page processed", "page", pageNumber, "skill_files", len(items), "new_candidates", pageCandidates, "candidates", candidates, "tree_failures", treeFailures, "content_failures", contentFailures, "duplicates", duplicates, "skipped_fresh", freshSkipped)
 		if len(result.Items) < 100 || pageNumber*100 >= result.TotalCount {
 			break
 		}
 	}
-	c.logger.Info("popular repository discovery complete", "candidates", len(candidates), "duplicates", duplicates, "content_failures", contentFailures, "skipped_fresh", freshSkipped)
+	c.logger.Info("popular repository discovery complete", "candidates", candidates, "duplicates", duplicates, "content_failures", contentFailures, "skipped_fresh", freshSkipped)
 	return candidates, duplicates, contentFailures, freshSkipped, nil
 }
 
@@ -466,15 +482,15 @@ type candidateResult struct {
 	err           error
 }
 
-func (c *Client) fetchCandidates(ctx context.Context, items []searchItem, officialOwners map[string]bool, filename string, page int) ([]indexer.Candidate, int, error) {
+func (c *Client) fetchCandidates(ctx context.Context, items []searchItem, officialOwners map[string]bool, filename string, page int, yield func(indexer.Candidate) error) (int, int, error) {
 	if len(items) == 0 {
-		return nil, 0, nil
+		return 0, 0, nil
 	}
 	workers := min(c.concurrency, len(items))
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan searchItem, len(items))
-	results := make(chan candidateResult, len(items))
+	results := make(chan candidateResult, workers)
 	for _, item := range items {
 		jobs <- item
 	}
@@ -504,7 +520,7 @@ func (c *Client) fetchCandidates(ctx context.Context, items []searchItem, offici
 		close(results)
 	}()
 
-	candidates := make([]indexer.Candidate, 0, len(items))
+	candidates := 0
 	contentFailures := 0
 	starsSkipped := 0
 	processed := 0
@@ -516,10 +532,10 @@ func (c *Client) fetchCandidates(ctx context.Context, items []searchItem, offici
 		case result, open := <-results:
 			if !open {
 				if fetchErr != nil {
-					return nil, contentFailures, fetchErr
+					return candidates, contentFailures, fetchErr
 				}
 				if err := ctx.Err(); err != nil {
-					return nil, contentFailures, err
+					return candidates, contentFailures, err
 				}
 				return candidates, contentFailures, nil
 			}
@@ -533,14 +549,19 @@ func (c *Client) fetchCandidates(ctx context.Context, items []searchItem, offici
 			if result.starsSkipped {
 				starsSkipped++
 			}
-			if result.found {
-				candidates = append(candidates, result.candidate)
+			if result.found && fetchErr == nil {
+				if err := yield(result.candidate); err != nil {
+					fetchErr = err
+					cancel()
+				} else {
+					candidates++
+				}
 			}
 			if processed%10 == 0 || processed == len(items) {
-				c.logger.Info("github skill page progress", "filename", filename, "page", page, "processed", processed, "total", len(items), "candidates_found", len(candidates), "skipped_stars", starsSkipped, "content_failures", contentFailures)
+				c.logger.Info("github skill page progress", "filename", filename, "page", page, "processed", processed, "total", len(items), "candidates_found", candidates, "skipped_stars", starsSkipped, "content_failures", contentFailures)
 			}
 		case <-heartbeat.C:
-			c.logger.Info("github skill page still processing", "filename", filename, "page", page, "processed", processed, "total", len(items), "candidates_found", len(candidates), "skipped_stars", starsSkipped, "content_failures", contentFailures)
+			c.logger.Info("github skill page still processing", "filename", filename, "page", page, "processed", processed, "total", len(items), "candidates_found", candidates, "skipped_stars", starsSkipped, "content_failures", contentFailures)
 		}
 	}
 }
@@ -570,7 +591,7 @@ func (c *Client) fetchCandidate(ctx context.Context, item searchItem, officialOw
 		return candidateResult{contentFailed: true}
 	}
 	folder, slug, id, owner := candidateIdentity(item)
-	files, err := c.folderFiles(ctx, item.Repository.FullName, folder)
+	files, err := c.folderFiles(ctx, item.Repository.FullName, folder, item.Path, file)
 	if err != nil && requestMustAbort(ctx, err) {
 		return candidateResult{err: err}
 	}
@@ -628,15 +649,28 @@ func (c *Client) getContent(ctx context.Context, endpoint string) (string, error
 	return string(raw), nil
 }
 
-func (c *Client) folderFiles(ctx context.Context, repo, folder string) ([]model.File, error) {
+type folderBudget struct {
+	files int
+	bytes int
+}
+
+func (c *Client) folderFiles(ctx context.Context, repo, folder, primaryPath, primaryContents string) ([]model.File, error) {
 	endpoint := c.baseURL + "/repos/" + repo + "/contents"
 	if folder != "." {
 		endpoint += "/" + strings.TrimPrefix(folder, "/")
 	}
-	return c.walkFolder(ctx, endpoint, folder, 0)
+	files := []model.File{{Path: path.Base(primaryPath), Contents: primaryContents}}
+	budget := &folderBudget{files: 1, bytes: len(primaryContents)}
+	supporting, err := c.walkFolder(ctx, endpoint, folder, primaryPath, 0, budget)
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, supporting...)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
 }
-func (c *Client) walkFolder(ctx context.Context, endpoint, root string, depth int) ([]model.File, error) {
-	if depth > 4 {
+func (c *Client) walkFolder(ctx context.Context, endpoint, root, primaryPath string, depth int, budget *folderBudget) ([]model.File, error) {
+	if depth > 4 || budget.files >= maxSkillFiles || budget.bytes >= maxSkillTotalBytes {
 		return nil, nil
 	}
 	var items []contentItem
@@ -645,12 +679,12 @@ func (c *Client) walkFolder(ctx context.Context, endpoint, root string, depth in
 	}
 	files := make([]model.File, 0)
 	for _, item := range items {
-		if len(files) >= maxSkillFiles {
+		if budget.files >= maxSkillFiles || budget.bytes >= maxSkillTotalBytes {
 			break
 		}
 		switch item.Type {
 		case "file":
-			if item.Size > maxFileBytes {
+			if item.Path == primaryPath || item.Size > maxFileBytes || item.Size > maxSkillTotalBytes-budget.bytes {
 				continue
 			}
 			contents, err := c.getContent(ctx, item.URL)
@@ -660,10 +694,15 @@ func (c *Client) walkFolder(ctx context.Context, endpoint, root string, depth in
 				}
 				continue
 			}
+			if len(contents) > maxSkillTotalBytes-budget.bytes {
+				continue
+			}
 			relative := strings.TrimPrefix(strings.TrimPrefix(item.Path, root), "/")
 			files = append(files, model.File{Path: relative, Contents: contents})
+			budget.files++
+			budget.bytes += len(contents)
 		case "dir":
-			nested, err := c.walkFolder(ctx, item.URL, root, depth+1)
+			nested, err := c.walkFolder(ctx, item.URL, root, primaryPath, depth+1, budget)
 			if err != nil && requestMustAbort(ctx, err) {
 				return nil, err
 			}
@@ -671,10 +710,6 @@ func (c *Client) walkFolder(ctx context.Context, endpoint, root string, depth in
 				files = append(files, nested...)
 			}
 		}
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	if len(files) > maxSkillFiles {
-		files = files[:maxSkillFiles]
 	}
 	return files, nil
 }

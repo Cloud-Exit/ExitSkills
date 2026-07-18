@@ -37,6 +37,8 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
+            - name: GOMEMLIMIT
+              value: {{ .Values.config.goMemoryLimit | quote }}
             - name: DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ include "exitskills.secretName" . }}, key: DATABASE_URL}}
             - name: GITHUB_TOKEN

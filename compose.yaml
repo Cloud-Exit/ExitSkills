@@ -35,6 +35,7 @@ services:
     ports:
       - "127.0.0.1:${EXITSKILLS_PORT:-8111}:8080"
     environment:
+      GOMEMLIMIT: ${GOMEMLIMIT:-384MiB}
       DATABASE_URL: postgres://exitskills:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the Compose environment file}@postgres:5432/exitskills?sslmode=disable
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in the Compose environment file}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in the Compose environment file}

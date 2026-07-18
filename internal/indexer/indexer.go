@@ -30,6 +30,9 @@ type Source interface {
 type FreshnessAwareSource interface {
 	DiscoverSkipping(context.Context, map[string]struct{}) ([]Candidate, error)
 }
+type StreamingSource interface {
+	DiscoverStream(context.Context, map[string]struct{}, func(Candidate) error) error
+}
 type Auditor interface {
 	Audit(context.Context, string) (audit.Result, error)
 }
@@ -37,13 +40,18 @@ type Store interface {
 	UpsertSkill(context.Context, model.Skill) error
 	DeleteSkill(context.Context, string) error
 	FreshSkillIDs(context.Context, time.Time) (map[string]struct{}, error)
-	UnassessedSkills(context.Context) ([]model.Skill, error)
+	UnassessedSkillCount(context.Context) (int, error)
+	UnassessedSkills(context.Context, int) ([]model.PendingSkillAssessment, error)
+	UpdateSkillAssessment(context.Context, string, int, int, model.Audit, time.Time) error
 }
 type Stats struct {
 	Discovered, Stored, SkippedWeak, SkippedStars, SkippedFresh, Failed int
 }
 
-const skillFreshness = 24 * time.Hour
+const (
+	skillFreshness = 24 * time.Hour
+	indexBatchSize = 10
+)
 
 type Indexer struct {
 	source               Source
@@ -87,15 +95,68 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	if err != nil {
 		return Stats{}, fmt.Errorf("load fresh skills: %w", err)
 	}
-	var candidates []Candidate
-	if source, aware := i.source.(FreshnessAwareSource); aware {
-		candidates, err = source.DiscoverSkipping(ctx, freshIDs)
+	stats := Stats{}
+	batchNumber := 0
+	batch := make([]Candidate, 0, indexBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		batchNumber++
+		i.logger.Info("indexing batch started", "batch", batchNumber, "candidates", len(batch), "batch_size_limit", indexBatchSize)
+		batchStats, err := i.indexBatch(ctx, batch, freshIDs, cutoff)
+		stats.add(batchStats)
+		for position := range batch {
+			batch[position] = Candidate{}
+		}
+		batch = batch[:0]
+		i.logger.Info("indexing batch complete", "batch", batchNumber, "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed)
+		return err
+	}
+	yield := func(candidate Candidate) error {
+		batch = append(batch, candidate)
+		if len(batch) == indexBatchSize {
+			return flush()
+		}
+		return nil
+	}
+	if source, streaming := i.source.(StreamingSource); streaming {
+		err = source.DiscoverStream(ctx, freshIDs, yield)
 	} else {
-		candidates, err = i.source.Discover(ctx)
+		var candidates []Candidate
+		if source, aware := i.source.(FreshnessAwareSource); aware {
+			candidates, err = source.DiscoverSkipping(ctx, freshIDs)
+		} else {
+			candidates, err = i.source.Discover(ctx)
+		}
+		if err == nil {
+			for _, candidate := range candidates {
+				if err = yield(candidate); err != nil {
+					break
+				}
+			}
+		}
 	}
 	if err != nil {
-		return Stats{}, err
+		return stats, err
 	}
+	if err := flush(); err != nil {
+		return stats, err
+	}
+	i.logger.Info("skill discovery complete", "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed, "freshness_cutoff", cutoff, "batches", batchNumber)
+	return stats, nil
+}
+
+func (stats *Stats) add(batch Stats) {
+	stats.Discovered += batch.Discovered
+	stats.Stored += batch.Stored
+	stats.SkippedWeak += batch.SkippedWeak
+	stats.SkippedStars += batch.SkippedStars
+	stats.SkippedFresh += batch.SkippedFresh
+	stats.Failed += batch.Failed
+}
+
+func (i *Indexer) indexBatch(ctx context.Context, candidates []Candidate, freshIDs map[string]struct{}, cutoff time.Time) (Stats, error) {
 	stats := Stats{Discovered: len(candidates)}
 	eligible := make([]Candidate, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -112,27 +173,21 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 		}
 		eligible = append(eligible, candidate)
 	}
-	i.logger.Info("skill discovery complete", "discovered", len(candidates), "eligible", len(eligible), "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "freshness_cutoff", cutoff)
-	i.logger.Info("skill auditing phase started", "eligible", len(eligible), "concurrency", min(i.concurrency, len(eligible)))
-	logProgress := func(processed int) {
-		if processed%10 == 0 || processed == len(candidates) {
-			i.logger.Info("indexing progress", "processed", processed, "total", len(candidates), "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed)
-		}
-	}
 	if len(eligible) == 0 {
-		logProgress(len(candidates))
+		i.logger.Info("indexing progress", "processed", len(candidates), "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed)
 		return stats, nil
 	}
+	i.logger.Info("skill auditing batch started", "eligible", len(eligible), "concurrency", min(i.concurrency, len(eligible)))
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan Candidate, len(eligible))
-	results := make(chan indexResult, len(eligible))
+	workers := min(i.concurrency, len(eligible))
+	results := make(chan indexResult, workers)
 	for _, candidate := range eligible {
 		jobs <- candidate
 	}
 	close(jobs)
-	workers := min(i.concurrency, len(eligible))
 	var group sync.WaitGroup
 	group.Add(workers)
 	for range workers {
@@ -167,7 +222,9 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 			runErr = result.err
 			cancel()
 		}
-		logProgress(processed)
+		if processed%indexBatchSize == 0 || processed == len(candidates) {
+			i.logger.Info("indexing progress", "processed", processed, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed)
+		}
 	}
 	if runErr != nil {
 		return stats, runErr
@@ -183,54 +240,67 @@ func (i *Indexer) Reconcile(ctx context.Context) error {
 		i.logger.Info("stored skill LLM assessment skipped", "reason", "ai_disabled")
 		return nil
 	}
-	skills, err := i.store.UnassessedSkills(ctx)
+	total, err := i.store.UnassessedSkillCount(ctx)
 	if err != nil {
-		return fmt.Errorf("load unchecked skills: %w", err)
+		return fmt.Errorf("count unchecked skills: %w", err)
 	}
-	i.logger.Info("stored unchecked skill assessment started", "skills", len(skills))
-	for index, skill := range skills {
-		position := index + 1
-		assessmentStarted := time.Now()
-		i.logger.Info("stored skill LLM assessment started", "skill_id", skill.ID, "position", position, "total", len(skills))
-		contents, ok := primarySkillContents(skill.Files)
-		if !ok {
-			i.logger.Warn("stored skill LLM assessment rejected", "skill_id", skill.ID, "position", position, "total", len(skills), "reason", "skill_file_missing", "duration_ms", time.Since(assessmentStarted).Milliseconds())
-			if err := i.store.DeleteSkill(ctx, skill.ID); err != nil {
-				return fmt.Errorf("remove unchecked skill without skill file %s: %w", skill.ID, err)
-			}
-			continue
-		}
-		result, err := i.auditWithContextRetry(ctx, skill.ID, contents)
+	i.logger.Info("stored unchecked skill assessment started", "skills", total, "batch_size", indexBatchSize)
+	processed := 0
+	batchNumber := 0
+	for processed < total {
+		skills, err := i.store.UnassessedSkills(ctx, indexBatchSize)
 		if err != nil {
-			if ctx.Err() != nil {
-				i.logger.Info("stored skill LLM assessment interrupted", "skill_id", skill.ID, "position", position, "total", len(skills), "reason", ctx.Err(), "duration_ms", time.Since(assessmentStarted).Milliseconds())
-				return ctx.Err()
-			}
-			i.logger.Warn("stored skill LLM assessment failed", "skill_id", skill.ID, "position", position, "total", len(skills), "error", err, "duration_ms", time.Since(assessmentStarted).Milliseconds())
-			if err := i.store.DeleteSkill(ctx, skill.ID); err != nil {
-				return fmt.Errorf("remove failed stored skill %s: %w", skill.ID, err)
-			}
-			continue
+			return fmt.Errorf("load unchecked skill batch: %w", err)
 		}
-		if result.Status != "pass" || result.Score < 5 || result.QualityScore < 5 {
-			i.logger.Info("stored skill LLM assessment rejected", "skill_id", skill.ID, "position", position, "total", len(skills), "status", result.Status, "security_score", result.Score, "quality_score", result.QualityScore, "risk_level", result.RiskLevel, "duration_ms", time.Since(assessmentStarted).Milliseconds())
-			if err := i.store.DeleteSkill(ctx, skill.ID); err != nil {
-				return fmt.Errorf("remove non-passing stored skill %s: %w", skill.ID, err)
+		if len(skills) == 0 {
+			return fmt.Errorf("unchecked skill count reported %d but batch was empty after %d processed", total, processed)
+		}
+		batchNumber++
+		i.logger.Info("stored skill LLM assessment batch started", "batch", batchNumber, "skills", len(skills), "processed", processed, "total", total)
+		for _, skill := range skills {
+			position := processed + 1
+			assessmentStarted := time.Now()
+			i.logger.Info("stored skill LLM assessment started", "skill_id", skill.ID, "position", position, "total", total)
+			if skill.Contents == "" {
+				i.logger.Warn("stored skill LLM assessment rejected", "skill_id", skill.ID, "position", position, "total", total, "reason", "skill_file_missing", "duration_ms", time.Since(assessmentStarted).Milliseconds())
+				if err := i.store.DeleteSkill(ctx, skill.ID); err != nil {
+					return fmt.Errorf("remove unchecked skill without skill file %s: %w", skill.ID, err)
+				}
+				processed++
+				continue
 			}
-			continue
+			result, err := i.auditWithContextRetry(ctx, skill.ID, skill.Contents)
+			if err != nil {
+				if ctx.Err() != nil {
+					i.logger.Info("stored skill LLM assessment interrupted", "skill_id", skill.ID, "position", position, "total", total, "reason", ctx.Err(), "duration_ms", time.Since(assessmentStarted).Milliseconds())
+					return ctx.Err()
+				}
+				i.logger.Warn("stored skill LLM assessment failed", "skill_id", skill.ID, "position", position, "total", total, "error", err, "duration_ms", time.Since(assessmentStarted).Milliseconds())
+				if err := i.store.DeleteSkill(ctx, skill.ID); err != nil {
+					return fmt.Errorf("remove failed stored skill %s: %w", skill.ID, err)
+				}
+				processed++
+				continue
+			}
+			if result.Status != "pass" || result.Score < 5 || result.QualityScore < 5 {
+				i.logger.Info("stored skill LLM assessment rejected", "skill_id", skill.ID, "position", position, "total", total, "status", result.Status, "security_score", result.Score, "quality_score", result.QualityScore, "risk_level", result.RiskLevel, "duration_ms", time.Since(assessmentStarted).Milliseconds())
+				if err := i.store.DeleteSkill(ctx, skill.ID); err != nil {
+					return fmt.Errorf("remove non-passing stored skill %s: %w", skill.ID, err)
+				}
+				processed++
+				continue
+			}
+			now := i.now().UTC()
+			skillAudit := model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: result.Status, Summary: result.Summary, RiskLevel: result.RiskLevel, Categories: result.Categories, AuditedAt: now}
+			if err := i.store.UpdateSkillAssessment(ctx, skill.ID, result.Score, result.QualityScore, skillAudit, now); err != nil {
+				return fmt.Errorf("store assessed skill %s: %w", skill.ID, err)
+			}
+			processed++
+			i.logger.Info("stored skill LLM assessment passed", "skill_id", skill.ID, "position", position, "total", total, "security_score", result.Score, "quality_score", result.QualityScore, "risk_level", result.RiskLevel, "duration_ms", time.Since(assessmentStarted).Milliseconds())
 		}
-		now := i.now().UTC()
-		skill.SecurityScore = result.Score
-		skill.QualityScore = result.QualityScore
-		skill.LLMChecked = true
-		skill.UpdatedAt = now
-		skill.Audit = model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: result.Status, Summary: result.Summary, RiskLevel: result.RiskLevel, Categories: result.Categories, AuditedAt: now}
-		if err := i.store.UpsertSkill(ctx, skill); err != nil {
-			return fmt.Errorf("store assessed skill %s: %w", skill.ID, err)
-		}
-		i.logger.Info("stored skill LLM assessment passed", "skill_id", skill.ID, "position", position, "total", len(skills), "security_score", result.Score, "quality_score", result.QualityScore, "risk_level", result.RiskLevel, "duration_ms", time.Since(assessmentStarted).Milliseconds())
+		i.logger.Info("stored skill LLM assessment batch complete", "batch", batchNumber, "processed", processed, "total", total)
 	}
-	i.logger.Info("stored unchecked skill assessment complete", "skills", len(skills))
+	i.logger.Info("stored unchecked skill assessment complete", "skills", processed, "batches", batchNumber)
 	return nil
 }
 

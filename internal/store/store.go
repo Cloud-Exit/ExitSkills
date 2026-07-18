@@ -22,7 +22,9 @@ type Backend interface {
 	SearchSkills(context.Context, string, string, int, bool) ([]model.Skill, error)
 	GetSkill(context.Context, string, bool) (model.Skill, error)
 	FreshSkillIDs(context.Context, time.Time) (map[string]struct{}, error)
-	UnassessedSkills(context.Context) ([]model.Skill, error)
+	UnassessedSkillCount(context.Context) (int, error)
+	UnassessedSkills(context.Context, int) ([]model.PendingSkillAssessment, error)
+	UpdateSkillAssessment(context.Context, string, int, int, model.Audit, time.Time) error
 	CuratedSkills(context.Context, bool) ([]model.Skill, error)
 	CreateAPIKey(context.Context, auth.KeyRecord) (string, error)
 	RevokeAPIKey(context.Context, string) (bool, error)

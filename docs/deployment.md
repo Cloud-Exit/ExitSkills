@@ -110,6 +110,8 @@ helm upgrade --install exitskills oci://ghcr.io/cloud-exit/charts/exitskills \
   --set image.tag=0.2.0
 ```
 
+The chart defaults `config.goMemoryLimit` to `384MiB` for its 512 MiB memory limit. Discovery and boot reconciliation audit and flush skills to the database in batches of 10, while retained files are capped at 4 MiB per skill. If you change `resources.limits.memory`, keep `config.goMemoryLimit` below it to preserve runtime and HTTP-serving headroom.
+
 Inspect the rollout, access the API locally, and create a client key using the bundled `admin` executable:
 
 ```sh
@@ -123,4 +125,4 @@ The liveness and readiness endpoints are `/healthz` and `/readyz`. The chart def
 
 ## Upgrades and backups
 
-Database migrations run automatically when the server or `admin` starts. When both AI settings are configured, boot assesses every stored unchecked skill before the API starts and before GitHub discovery; only explicit passes remain. Omit both settings to skip all LLM processing and publish discovered skills with `llmChecked: false` and no implied scores. Back up PostgreSQL before upgrades and keep `ENCRYPTION_KEY` unchanged, because changing it invalidates stored API-key authentication. For SQLite deployments, stop the container and back up the Docker volume before replacing the image.
+Database migrations run automatically when the server or `admin` starts. When both AI settings are configured, the HTTP listener starts first, then boot assesses every stored unchecked skill before GitHub discovery; only explicit passes are returned by catalog endpoints. Omit both settings to skip all LLM processing and publish discovered skills with `llmChecked: false` and no implied scores. Back up PostgreSQL before upgrades and keep `ENCRYPTION_KEY` unchanged, because changing it invalidates stored API-key authentication. For SQLite deployments, stop the container and back up the Docker volume before replacing the image.

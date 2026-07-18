@@ -50,6 +50,13 @@ type Skill struct {
 	UpdatedAt time.Time `json:"-"`
 }
 
+// PendingSkillAssessment intentionally contains only the canonical skill file.
+// Reconciliation must not load every supporting file into memory.
+type PendingSkillAssessment struct {
+	ID       string
+	Contents string
+}
+
 type ListOptions struct {
 	View           string
 	Page           int

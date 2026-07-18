@@ -197,6 +197,46 @@ func TestDiscoverFetchesCandidatesConcurrently(t *testing.T) {
 	}
 }
 
+func TestFetchCandidateCapsSupportingFileMemory(t *testing.T) {
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	primary := []byte("# Skill")
+	supporting := bytes.Repeat([]byte("x"), maxFileBytes)
+	mux.HandleFunc("/primary", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(primary)})
+	})
+	mux.HandleFunc("/repos/acme/tool/contents/skill", func(w http.ResponseWriter, _ *http.Request) {
+		items := []any{map[string]any{"type": "file", "name": "SKILL.md", "path": "skill/SKILL.md", "url": server.URL + "/primary", "size": len(primary)}}
+		for position := range 12 {
+			items = append(items, map[string]any{"type": "file", "name": fmt.Sprintf("support-%d.md", position), "path": fmt.Sprintf("skill/support-%d.md", position), "url": fmt.Sprintf("%s/support/%d", server.URL, position), "size": len(supporting)})
+		}
+		_ = json.NewEncoder(w).Encode(items)
+	})
+	mux.HandleFunc("/support/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(supporting)})
+	})
+	item := searchItem{Name: "SKILL.md", Path: "skill/SKILL.md", URL: server.URL + "/primary"}
+	item.Repository.FullName = "acme/tool"
+	item.Repository.Stars = 11
+	result := NewClient(server.URL, "token", server.URL+"/official", server.Client()).fetchCandidate(context.Background(), item, nil)
+	if !result.found || result.err != nil {
+		t.Fatalf("fetchCandidate() = %+v", result)
+	}
+	total := 0
+	canonical := false
+	for _, file := range result.candidate.Files {
+		total += len(file.Contents)
+		canonical = canonical || file.Path == "SKILL.md"
+	}
+	if total > 4<<20 {
+		t.Fatalf("supporting file contents use %d bytes, want at most 4 MiB", total)
+	}
+	if !canonical {
+		t.Fatal("bounded supporting files dropped SKILL.md")
+	}
+}
+
 func TestDiscoverSkipsLowStarRepositoryBeforeDownloadingContent(t *testing.T) {
 	mux := http.NewServeMux()
 	server := httptest.NewServer(mux)
