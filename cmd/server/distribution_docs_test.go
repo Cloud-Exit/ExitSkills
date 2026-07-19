@@ -43,8 +43,8 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 		},
 		"../../deploy/helm/exitskills/Chart.yaml": {
 			"name: exitskills",
-			"version: 0.2.0",
-			"appVersion: \"0.2.0\"",
+			"version: 1.0.0",
+			"appVersion: \"1.0.0\"",
 		},
 		"../../deploy/helm/exitskills/templates/deployment.yaml": {
 			"name: GOMEMLIMIT",
@@ -80,7 +80,7 @@ func TestOpenSourceDistributionArtifacts(t *testing.T) {
 			"docker compose",
 			"helm upgrade --install",
 			"oci://ghcr.io/cloud-exit/charts/exitskills",
-			"--version 0.2.0",
+			"--version 1.0.0",
 			"--security-opt no-new-privileges",
 			"--cap-drop ALL",
 		},

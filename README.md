@@ -226,7 +226,7 @@ See the complete [Docker, Docker Compose, and Kubernetes deployment guide](docs/
 
 ## CI and releases
 
-Pull requests and non-main pushes run formatting, vet, race-enabled tests, builds, and Helm linting. Every push to `main` creates the next patch release in the chart's SemVer line (starting at `0.2.0`), publishes versioned and `latest` images to GHCR, publishes the `exitskills` chart to `oci://ghcr.io/cloud-exit/charts/exitskills`, and creates a `vMAJOR.MINOR.PATCH` GitHub release containing the two binaries and chart archive.
+Pull requests and non-main pushes run formatting, vet, race-enabled tests, builds, and Helm linting. Every push to `main` creates the next patch release in the chart's SemVer line (currently `1.0.x`), publishes versioned and `latest` images to GHCR, publishes the `exitskills` chart to `oci://ghcr.io/cloud-exit/charts/exitskills`, and creates a `vMAJOR.MINOR.PATCH` GitHub release containing the two binaries and chart archive.
 
 Development follows mandatory TDD. Update this README whenever behavior, setup, configuration, APIs, or operations change.
 

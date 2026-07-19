@@ -103,11 +103,11 @@ Install the published OCI Helm chart. Pin an explicit SemVer in production:
 
 ```sh
 helm upgrade --install exitskills oci://ghcr.io/cloud-exit/charts/exitskills \
-  --version 0.2.0 \
+  --version 1.0.0 \
   --namespace exitskills \
   --set fullnameOverride=exitskills \
   --set existingSecret=exitskills-secrets \
-  --set image.tag=0.2.0
+  --set image.tag=1.0.0
 ```
 
 The chart defaults `config.goMemoryLimit` to `384MiB` for its 512 MiB memory limit. Discovery and boot reconciliation audit and flush skills to the database in batches of 10, while retained files are capped at 4 MiB per skill. If you change `resources.limits.memory`, keep `config.goMemoryLimit` below it to preserve runtime and HTTP-serving headroom.
