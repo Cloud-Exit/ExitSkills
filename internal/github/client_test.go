@@ -237,6 +237,20 @@ func TestFetchCandidateCapsSupportingFileMemory(t *testing.T) {
 	}
 }
 
+func TestGetContentRejectsNULBytes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"encoding": "base64",
+			"content":  base64.StdEncoding.EncodeToString([]byte("text\x00binary")),
+		})
+	}))
+	defer server.Close()
+	_, err := NewClient(server.URL, "token", server.URL+"/official", server.Client()).getContent(context.Background(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("getContent() error = %v, want NUL rejection", err)
+	}
+}
+
 func TestDiscoverSkipsLowStarRepositoryBeforeDownloadingContent(t *testing.T) {
 	mux := http.NewServeMux()
 	server := httptest.NewServer(mux)

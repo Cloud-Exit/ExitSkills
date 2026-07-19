@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exitmesh/skills/internal/indexer"
 	"github.com/exitmesh/skills/internal/model"
@@ -645,6 +647,12 @@ func (c *Client) getContent(ctx context.Context, endpoint string) (string, error
 	}
 	if len(raw) > maxFileBytes {
 		return "", fmt.Errorf("file exceeds %d bytes", maxFileBytes)
+	}
+	if bytes.IndexByte(raw, 0) >= 0 {
+		return "", errors.New("file contains NUL bytes")
+	}
+	if !utf8.Valid(raw) {
+		return "", errors.New("file is not valid UTF-8 text")
 	}
 	return string(raw), nil
 }

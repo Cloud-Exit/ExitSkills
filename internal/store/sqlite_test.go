@@ -177,6 +177,16 @@ func TestSQLiteLoadsCompactUncheckedSkillBatches(t *testing.T) {
 	}
 }
 
+func TestSQLiteRejectsNULSkillContents(t *testing.T) {
+	db := openTestSQLite(t)
+	skill := testSkill()
+	skill.Files = []model.File{{Path: "SKILL.md", Contents: "valid\x00invalid"}}
+	err := db.UpsertSkill(context.Background(), skill)
+	if !errors.Is(err, model.ErrInvalidSkillContents) {
+		t.Fatalf("UpsertSkill() error = %v, want ErrInvalidSkillContents", err)
+	}
+}
+
 func TestSQLiteMigrationRemovesRowsWithoutCanonicalSkillFile(t *testing.T) {
 	db := openTestSQLite(t)
 	ctx := context.Background()

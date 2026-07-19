@@ -77,6 +77,7 @@ type fakeStore struct {
 	unassessed []model.Skill
 	cutoff     time.Time
 	batchLoads []int
+	upsertErrs map[string]error
 }
 
 func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
@@ -101,6 +102,9 @@ func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
 func (f *fakeStore) UpsertSkill(_ context.Context, skill model.Skill) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.upsertErrs[skill.ID]; err != nil {
+		return err
+	}
 	f.upserted = append(f.upserted, skill)
 	return nil
 }
@@ -182,6 +186,27 @@ func TestRunFlushesEveryTenStreamedCandidatesBeforeDiscoveryContinues(t *testing
 	}
 	if stats.Discovered != 25 || stats.Stored != 25 {
 		t.Fatalf("stats = %+v, want 25 candidates discovered and stored", stats)
+	}
+}
+
+func TestRunContinuesAfterInvalidCandidateContents(t *testing.T) {
+	candidates := make([]Candidate, 11)
+	for position := range candidates {
+		id := fmt.Sprintf("org/repo/skill-%d", position)
+		candidates[position] = Candidate{ID: id, Source: "org/repo", Slug: fmt.Sprintf("skill-%d", position), Name: id, Stars: 11, Contents: id}
+	}
+	store := &fakeStore{upsertErrs: map[string]error{
+		candidates[2].ID: fmt.Errorf("%w: contains NUL", model.ErrInvalidSkillContents),
+	}}
+	stats, err := New(fakeSource{candidates: candidates}, nil, store, time.Now).Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Stored != 10 || stats.Failed != 1 {
+		t.Fatalf("stats = %+v, want 10 stored and 1 failed", stats)
+	}
+	if len(store.upserted) != 10 || store.upserted[len(store.upserted)-1].ID != candidates[10].ID {
+		t.Fatalf("indexing did not continue into the next batch: %+v", store.upserted)
 	}
 }
 

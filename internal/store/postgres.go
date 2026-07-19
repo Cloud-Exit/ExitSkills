@@ -14,6 +14,7 @@ import (
 	"github.com/exitmesh/skills/internal/auth"
 	"github.com/exitmesh/skills/internal/model"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -44,14 +45,25 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	return err
 }
 
+func classifyPostgresSkillError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) && postgresError.Code == "22P05" {
+		return fmt.Errorf("%w: %v", model.ErrInvalidSkillContents, err)
+	}
+	return err
+}
+
 const columns = `id, slug, name, description, source, installs, stars, source_type, install_url, public_url,
  is_duplicate, security_score, quality_score, llm_checked, official, content_hash, files, audit_provider, audit_slug, audit_status,
  audit_summary, audit_risk_level, audit_categories, audited_at, updated_at`
 
 func (p *Postgres) UpsertSkill(ctx context.Context, skill model.Skill) error {
-	files, err := json.Marshal(skill.Files)
+	files, err := marshalSkillFiles(skill.Files)
 	if err != nil {
-		return err
+		return classifyPostgresSkillError(err)
 	}
 	categories, err := json.Marshal(skill.Audit.Categories)
 	if err != nil {
@@ -70,7 +82,7 @@ audit_categories=EXCLUDED.audit_categories,audited_at=EXCLUDED.audited_at,update
 		skill.InstallURL, skill.URL, skill.IsDuplicate, skill.SecurityScore, skill.QualityScore, skill.LLMChecked, skill.Official, skill.Hash, files,
 		skill.Audit.Provider, skill.Audit.Slug, skill.Audit.Status, skill.Audit.Summary, skill.Audit.RiskLevel,
 		categories, skill.Audit.AuditedAt, skill.UpdatedAt)
-	return err
+	return classifyPostgresSkillError(err)
 }
 
 func (p *Postgres) DeleteSkill(ctx context.Context, id string) error {
@@ -167,7 +179,7 @@ audit_provider=$3, audit_slug=$4, audit_status=$5, audit_summary=$6, audit_risk_
 audited_at=$9, updated_at=$10 WHERE id=$11 AND llm_checked=FALSE`, securityScore, qualityScore, skillAudit.Provider,
 		skillAudit.Slug, skillAudit.Status, skillAudit.Summary, skillAudit.RiskLevel, categories, skillAudit.AuditedAt, updatedAt, id)
 	if err != nil {
-		return err
+		return classifyPostgresSkillError(err)
 	}
 	if result.RowsAffected() == 0 {
 		return model.ErrNotFound

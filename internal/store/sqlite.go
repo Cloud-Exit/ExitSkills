@@ -169,7 +169,7 @@ WHERE NOT EXISTS (
 }
 
 func (s *SQLite) UpsertSkill(ctx context.Context, skill model.Skill) error {
-	files, err := json.Marshal(skill.Files)
+	files, err := marshalSkillFiles(skill.Files)
 	if err != nil {
 		return err
 	}

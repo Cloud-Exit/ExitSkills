@@ -380,6 +380,10 @@ func (i *Indexer) indexCandidate(ctx context.Context, candidate Candidate) index
 	now := i.now().UTC()
 	skill := model.Skill{ID: candidate.ID, Source: candidate.Source, Slug: candidate.Slug, Name: candidate.Name, Description: candidate.Description, Stars: candidate.Stars, Installs: candidate.Stars, SourceType: "github", InstallURL: "https://github.com/" + candidate.Source, URL: i.publicBaseURL + "/" + candidate.ID, SecurityScore: result.Score, QualityScore: result.QualityScore, LLMChecked: llmChecked, Official: candidate.Official, Hash: hex.EncodeToString(sum[:]), Files: candidate.Files, UpdatedAt: now, Audit: model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: result.Status, Summary: result.Summary, RiskLevel: result.RiskLevel, Categories: result.Categories, AuditedAt: now}}
 	if err := i.store.UpsertSkill(ctx, skill); err != nil {
+		if errors.Is(err, model.ErrInvalidSkillContents) {
+			i.logger.Warn("skill storage skipped", "skill_id", candidate.ID, "reason", "invalid_contents", "error", err)
+			return indexResult{status: indexFailed}
+		}
 		return indexResult{err: fmt.Errorf("store skill %s: %w", candidate.ID, err)}
 	}
 	i.logger.Debug("skill indexed", "skill_id", candidate.ID, "security_score", result.Score, "quality_score", result.QualityScore, "risk_level", result.RiskLevel, "official", candidate.Official, "files", len(candidate.Files))

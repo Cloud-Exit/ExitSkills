@@ -6,8 +6,9 @@ import (
 )
 
 var (
-	ErrNotFound     = errors.New("not found")
-	ErrUnauthorized = errors.New("unauthorized")
+	ErrNotFound             = errors.New("not found")
+	ErrUnauthorized         = errors.New("unauthorized")
+	ErrInvalidSkillContents = errors.New("invalid skill contents")
 )
 
 type File struct {

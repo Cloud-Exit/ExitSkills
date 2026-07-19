@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exitmesh/skills/internal/auth"
 	"github.com/exitmesh/skills/internal/model"
@@ -31,6 +33,18 @@ type Backend interface {
 	LookupAPIKey(context.Context, []byte) (string, error)
 	RecordSkillDownload(context.Context, string, string) error
 	AdminStats(context.Context) (model.AdminStats, error)
+}
+
+func marshalSkillFiles(files []model.File) ([]byte, error) {
+	for _, file := range files {
+		if strings.IndexByte(file.Contents, 0) >= 0 {
+			return nil, fmt.Errorf("%w: %s contains NUL", model.ErrInvalidSkillContents, file.Path)
+		}
+		if !utf8.ValidString(file.Contents) {
+			return nil, fmt.Errorf("%w: %s is not UTF-8", model.ErrInvalidSkillContents, file.Path)
+		}
+	}
+	return json.Marshal(files)
 }
 
 // Open selects SQLite for sqlite: and file: URLs and PostgreSQL for postgres
