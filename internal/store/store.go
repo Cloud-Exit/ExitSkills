@@ -24,6 +24,7 @@ type Backend interface {
 	SearchSkills(context.Context, string, string, int, bool) ([]model.Skill, error)
 	GetSkill(context.Context, string, bool) (model.Skill, error)
 	FreshSkillIDs(context.Context, time.Time) (map[string]struct{}, error)
+	SkillContentHashes(context.Context) (map[string]string, error)
 	UnassessedSkillCount(context.Context) (int, error)
 	UnassessedSkills(context.Context, int) ([]model.PendingSkillAssessment, error)
 	UpdateSkillAssessment(context.Context, string, int, int, model.Audit, time.Time) error

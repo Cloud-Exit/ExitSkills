@@ -242,6 +242,13 @@ func TestSQLiteSkillRepositoryCompatibility(t *testing.T) {
 	if _, exists := atBoundary[skill.ID]; exists {
 		t.Fatalf("skill updated exactly at cutoff was marked fresh: %v", atBoundary)
 	}
+	hashes, err := db.SkillContentHashes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hashes[skill.ID] != skill.Hash {
+		t.Fatalf("content hash = %q, want %q", hashes[skill.ID], skill.Hash)
+	}
 
 	searched, err := db.SearchSkills(ctx, "demo", "acme", 10, false)
 	if err != nil {

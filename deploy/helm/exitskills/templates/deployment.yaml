@@ -62,6 +62,7 @@ spec:
             - {name: INDEX_INTERVAL, value: {{ .Values.config.indexInterval | quote }}}
             - {name: INDEX_ON_START, value: {{ .Values.config.indexOnStart | quote }}}
             - {name: INDEX_CONCURRENCY, value: {{ .Values.config.indexConcurrency | quote }}}
+            - {name: AI_AUDIT_INTERVAL, value: {{ .Values.config.aiAuditInterval | quote }}}
             - {name: LOG_LEVEL, value: {{ .Values.config.logLevel | quote }}}
             - {name: RATE_LIMIT_REQUESTS, value: {{ .Values.config.rateLimitRequests | quote }}}
             - {name: RATE_LIMIT_WINDOW, value: {{ .Values.config.rateLimitWindow | quote }}}

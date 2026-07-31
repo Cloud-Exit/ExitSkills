@@ -23,7 +23,7 @@ func Run(ctx context.Context, interval time.Duration, runOnStart bool, runner Ru
 			}
 			return
 		}
-		logger.Info("indexing complete", "trigger", trigger, "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed, "duration", time.Since(started))
+		logger.Info("indexing complete", "trigger", trigger, "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "skipped_unchanged", stats.SkippedUnchanged, "failed", stats.Failed, "duration", time.Since(started))
 	}
 	if runOnStart {
 		run("startup")

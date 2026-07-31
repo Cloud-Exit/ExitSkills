@@ -139,6 +139,22 @@ func (p *Postgres) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[str
 	}
 	return ids, rows.Err()
 }
+func (p *Postgres) SkillContentHashes(ctx context.Context) (map[string]string, error) {
+	rows, err := p.pool.Query(ctx, `SELECT id, content_hash FROM skills WHERE quality_score IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hashes := make(map[string]string)
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			return nil, err
+		}
+		hashes[id] = hash
+	}
+	return hashes, rows.Err()
+}
 func (p *Postgres) UnassessedSkillCount(ctx context.Context) (int, error) {
 	var count int
 	err := p.pool.QueryRow(ctx, `SELECT count(*) FROM skills WHERE llm_checked=FALSE`).Scan(&count)

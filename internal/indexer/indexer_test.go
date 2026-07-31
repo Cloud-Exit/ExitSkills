@@ -74,6 +74,7 @@ type fakeStore struct {
 	upserted   []model.Skill
 	deleted    []string
 	fresh      map[string]struct{}
+	hashes     map[string]string
 	unassessed []model.Skill
 	cutoff     time.Time
 	batchLoads []int
@@ -125,6 +126,9 @@ func (f *fakeStore) FreshSkillIDs(_ context.Context, cutoff time.Time) (map[stri
 	f.cutoff = cutoff
 	f.mu.Unlock()
 	return f.fresh, nil
+}
+func (f *fakeStore) SkillContentHashes(context.Context) (map[string]string, error) {
+	return f.hashes, nil
 }
 func (f *fakeStore) UnassessedSkillCount(context.Context) (int, error) {
 	f.mu.Lock()
@@ -372,16 +376,35 @@ func (a *cancelOnceAuditor) Audit(context.Context, string) (audit.Result, error)
 type recordingAuditor struct {
 	mu    sync.Mutex
 	calls []string
+	times []time.Time
 }
 
 func (a *recordingAuditor) Audit(_ context.Context, contents string) (audit.Result, error) {
 	a.mu.Lock()
 	a.calls = append(a.calls, contents)
+	a.times = append(a.times, time.Now())
 	a.mu.Unlock()
 	return audit.Result{Score: 8, QualityScore: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
 }
 
-func TestRunSkipsStoredSkillsUpdatedLessThanTwentyFourHoursAgo(t *testing.T) {
+func TestRunPacesAssessmentStarts(t *testing.T) {
+	auditor := &recordingAuditor{}
+	source := fakeSource{candidates: []Candidate{
+		{ID: "org/repo/one", Source: "org/repo", Slug: "one", Stars: 20, Contents: "one"},
+		{ID: "org/repo/two", Source: "org/repo", Slug: "two", Stars: 20, Contents: "two"},
+	}}
+	if _, err := New(source, auditor, &fakeStore{}, time.Now).
+		WithConcurrency(2).
+		WithAssessmentInterval(30 * time.Millisecond).
+		Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(auditor.times) != 2 || auditor.times[1].Sub(auditor.times[0]) < 25*time.Millisecond {
+		t.Fatalf("assessment starts were not paced: %v", auditor.times)
+	}
+}
+
+func TestRunSkipsStoredSkillsUpdatedLessThanSevenDaysAgo(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	source := fakeSource{candidates: []Candidate{
 		{ID: "org/repo/fresh", Source: "org/repo", Slug: "fresh", Name: "Fresh", Stars: 11, Contents: "fresh"},
@@ -400,13 +423,55 @@ func TestRunSkipsStoredSkillsUpdatedLessThanTwentyFourHoursAgo(t *testing.T) {
 	if len(store.upserted) != 2 {
 		t.Fatalf("upserted = %d, want 2", len(store.upserted))
 	}
-	if !store.cutoff.Equal(now.Add(-24 * time.Hour)) {
-		t.Fatalf("freshness cutoff = %v, want %v", store.cutoff, now.Add(-24*time.Hour))
+	if !store.cutoff.Equal(now.Add(-7 * 24 * time.Hour)) {
+		t.Fatalf("freshness cutoff = %v, want %v", store.cutoff, now.Add(-7*24*time.Hour))
 	}
 	auditor.mu.Lock()
 	defer auditor.mu.Unlock()
 	if len(auditor.calls) != 2 || slices.Contains(auditor.calls, "fresh") {
 		t.Fatalf("audit calls = %v, want boundary and new only", auditor.calls)
+	}
+}
+
+func TestRunDoesNotAuditOrStoreUnchangedStaleSkill(t *testing.T) {
+	files := []model.File{{Path: "SKILL.md", Contents: "unchanged"}}
+	source := fakeSource{candidates: []Candidate{{
+		ID: "org/repo/demo", Source: "org/repo", Slug: "demo", Name: "Demo", Stars: 20,
+		Contents: "unchanged", Files: files,
+	}}}
+	store := &fakeStore{hashes: map[string]string{"org/repo/demo": hashFiles(files)}}
+	auditor := &recordingAuditor{}
+
+	stats, err := New(source, auditor, store, time.Now).Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SkippedUnchanged != 1 || stats.Stored != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if len(auditor.calls) != 0 || len(store.upserted) != 0 || len(store.deleted) != 0 {
+		t.Fatalf("unchanged skill caused action: audits=%v upserts=%d deletes=%v", auditor.calls, len(store.upserted), store.deleted)
+	}
+}
+
+func TestRunAuditsAndStoresChangedStaleSkill(t *testing.T) {
+	files := []model.File{{Path: "SKILL.md", Contents: "changed"}}
+	source := fakeSource{candidates: []Candidate{{
+		ID: "org/repo/demo", Source: "org/repo", Slug: "demo", Name: "Demo", Stars: 20,
+		Contents: "changed", Files: files,
+	}}}
+	store := &fakeStore{hashes: map[string]string{"org/repo/demo": "old-hash"}}
+	auditor := &recordingAuditor{}
+
+	stats, err := New(source, auditor, store, time.Now).Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Stored != 1 || stats.SkippedUnchanged != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if len(auditor.calls) != 1 || auditor.calls[0] != "changed" || len(store.upserted) != 1 {
+		t.Fatalf("changed skill was not refreshed: audits=%v upserts=%d", auditor.calls, len(store.upserted))
 	}
 }
 

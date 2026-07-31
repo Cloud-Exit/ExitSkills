@@ -24,8 +24,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.IndexInterval != 24*time.Hour {
-		t.Fatalf("IndexInterval = %v, want 24h", cfg.IndexInterval)
+	if cfg.IndexInterval != 7*24*time.Hour {
+		t.Fatalf("IndexInterval = %v, want 168h", cfg.IndexInterval)
 	}
 	if cfg.RateLimit != 600 || cfg.ListenAddress != ":8080" {
 		t.Fatalf("unexpected defaults: rate=%d listen=%q", cfg.RateLimit, cfg.ListenAddress)
@@ -33,8 +33,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
 	}
-	if cfg.IndexConcurrency != 8 {
-		t.Fatalf("IndexConcurrency = %d, want 8", cfg.IndexConcurrency)
+	if cfg.IndexConcurrency != 2 {
+		t.Fatalf("IndexConcurrency = %d, want 2", cfg.IndexConcurrency)
+	}
+	if cfg.AIAuditInterval != 5*time.Second {
+		t.Fatalf("AIAuditInterval = %v, want 5s", cfg.AIAuditInterval)
 	}
 	if cfg.MasterToken != testMasterToken {
 		t.Fatalf("MasterToken = %q, want configured value", cfg.MasterToken)
@@ -305,6 +308,7 @@ func clearOptionalConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"AI_API_KEY",
+		"AI_AUDIT_INTERVAL",
 		"EXITMESH_LOCAL_DEVELOPMENT",
 		"GITHUB_API_BASE_URL",
 		"GITHUB_CLIENT_ID",

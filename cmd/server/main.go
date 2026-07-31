@@ -68,7 +68,7 @@ func main() {
 	if cfg.AIEnabled {
 		auditor = audit.NewClient(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, httpClient)
 	}
-	worker := indexer.New(source, auditor, db, time.Now).WithPublicBaseURL(cfg.PublicBaseURL).WithLogger(logger).WithConcurrency(cfg.IndexConcurrency)
+	worker := indexer.New(source, auditor, db, time.Now).WithPublicBaseURL(cfg.PublicBaseURL).WithLogger(logger).WithConcurrency(1).WithAssessmentInterval(cfg.AIAuditInterval)
 	handler := httpapi.NewHandler(db, auth.NewVerifier(keys, db), httpapi.NewLimiter(cfg.RateLimit, cfg.RateWindow), httpapi.WithAdmin(cfg.MasterToken, keys, db), httpapi.WithLLMEnforcement(cfg.AIEnabled))
 	server := newHTTPServer(cfg.ListenAddress, handler)
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
@@ -77,7 +77,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer server.Close()
-	logger.Info("server listening", "address", cfg.ListenAddress, "version", version, "log_level", cfg.LogLevel, "index_concurrency", cfg.IndexConcurrency)
+	logger.Info("server listening", "address", cfg.ListenAddress, "version", version, "log_level", cfg.LogLevel, "index_concurrency", cfg.IndexConcurrency, "ai_audit_interval", cfg.AIAuditInterval)
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server failed", "error", err)

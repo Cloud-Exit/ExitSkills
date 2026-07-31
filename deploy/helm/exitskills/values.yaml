@@ -48,9 +48,10 @@ config:
   aiModel: ""
   githubApiBaseUrl: "https://api.github.com"
   officialSkillsUrl: "https://www.skills.sh/official"
-  indexInterval: "24h"
+  indexInterval: "168h"
   indexOnStart: true
-  indexConcurrency: 8
+  indexConcurrency: 2
+  aiAuditInterval: "5s"
   logLevel: "info"
   rateLimitRequests: 600
   rateLimitWindow: "1m"

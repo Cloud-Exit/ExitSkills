@@ -29,6 +29,7 @@ type Config struct {
 	IndexInterval      time.Duration
 	IndexConcurrency   int
 	IndexOnStart       bool
+	AIAuditInterval    time.Duration
 	RateLimit          int
 	RateWindow         time.Duration
 	GitHubAPIBaseURL   string
@@ -170,7 +171,7 @@ func loadCommon() (Config, error) {
 		}
 	}
 
-	indexInterval, err := durationEnv("INDEX_INTERVAL", 24*time.Hour)
+	indexInterval, err := durationEnv("INDEX_INTERVAL", 7*24*time.Hour)
 	if err != nil {
 		return Config{}, err
 	}
@@ -189,7 +190,7 @@ func loadCommon() (Config, error) {
 		}
 		return Config{}, fmt.Errorf("RATE_LIMIT_REQUESTS: %w", err)
 	}
-	indexConcurrency, err := intEnv("INDEX_CONCURRENCY", 8)
+	indexConcurrency, err := intEnv("INDEX_CONCURRENCY", 2)
 	if err != nil || indexConcurrency < 1 || indexConcurrency > 32 {
 		if err == nil {
 			err = errors.New("must be between 1 and 32")
@@ -197,6 +198,10 @@ func loadCommon() (Config, error) {
 		return Config{}, fmt.Errorf("INDEX_CONCURRENCY: %w", err)
 	}
 	indexOnStart, err := boolEnv("INDEX_ON_START", true)
+	if err != nil {
+		return Config{}, err
+	}
+	aiAuditInterval, err := durationEnv("AI_AUDIT_INTERVAL", 5*time.Second)
 	if err != nil {
 		return Config{}, err
 	}
@@ -211,7 +216,7 @@ func loadCommon() (Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"), GitHubToken: os.Getenv("GITHUB_TOKEN"), MasterToken: strings.TrimSpace(os.Getenv("MASTER_TOKEN")), EncryptionKey: key,
 		AIBaseURL: strings.TrimRight(os.Getenv("AI_BASE_URL"), "/"), AIAPIKey: os.Getenv("AI_API_KEY"), AIModel: os.Getenv("AI_MODEL"),
 		ListenAddress: envOr("LISTEN_ADDRESS", ":8080"), PublicBaseURL: strings.TrimRight(envOr("PUBLIC_BASE_URL", "https://skills.exitmesh.com"), "/"),
-		IndexInterval: indexInterval, IndexConcurrency: indexConcurrency, IndexOnStart: indexOnStart, RateLimit: rateLimit, RateWindow: rateWindow,
+		IndexInterval: indexInterval, IndexConcurrency: indexConcurrency, IndexOnStart: indexOnStart, AIAuditInterval: aiAuditInterval, RateLimit: rateLimit, RateWindow: rateWindow,
 		GitHubAPIBaseURL: strings.TrimRight(envOr("GITHUB_API_BASE_URL", "https://api.github.com"), "/"),
 		OfficialURL:      envOr("OFFICIAL_SKILLS_URL", "https://www.skills.sh/official"), RequestTimeout: requestTimeout, LogLevel: logLevel,
 	}, nil

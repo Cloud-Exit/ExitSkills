@@ -250,6 +250,22 @@ func (s *SQLite) FreshSkillIDs(ctx context.Context, cutoff time.Time) (map[strin
 	}
 	return ids, rows.Err()
 }
+func (s *SQLite) SkillContentHashes(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content_hash FROM skills WHERE quality_score IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hashes := make(map[string]string)
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			return nil, err
+		}
+		hashes[id] = hash
+	}
+	return hashes, rows.Err()
+}
 func (s *SQLite) UnassessedSkillCount(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM skills WHERE llm_checked=0`).Scan(&count)

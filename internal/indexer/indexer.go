@@ -40,16 +40,17 @@ type Store interface {
 	UpsertSkill(context.Context, model.Skill) error
 	DeleteSkill(context.Context, string) error
 	FreshSkillIDs(context.Context, time.Time) (map[string]struct{}, error)
+	SkillContentHashes(context.Context) (map[string]string, error)
 	UnassessedSkillCount(context.Context) (int, error)
 	UnassessedSkills(context.Context, int) ([]model.PendingSkillAssessment, error)
 	UpdateSkillAssessment(context.Context, string, int, int, model.Audit, time.Time) error
 }
 type Stats struct {
-	Discovered, Stored, SkippedWeak, SkippedStars, SkippedFresh, Failed int
+	Discovered, Stored, SkippedWeak, SkippedStars, SkippedFresh, SkippedUnchanged, Failed int
 }
 
 const (
-	skillFreshness = 24 * time.Hour
+	skillFreshness = 7 * 24 * time.Hour
 	indexBatchSize = 10
 )
 
@@ -62,6 +63,9 @@ type Indexer struct {
 	logger               *slog.Logger
 	concurrency          int
 	assessmentRetryDelay time.Duration
+	assessmentInterval   time.Duration
+	assessmentGate       sync.Mutex
+	lastAssessmentStart  time.Time
 }
 
 func New(source Source, auditor Auditor, store Store, now func() time.Time) *Indexer {
@@ -75,6 +79,12 @@ func (i *Indexer) WithPublicBaseURL(url string) *Indexer { i.publicBaseURL = url
 func (i *Indexer) WithConcurrency(concurrency int) *Indexer {
 	if concurrency > 0 {
 		i.concurrency = concurrency
+	}
+	return i
+}
+func (i *Indexer) WithAssessmentInterval(interval time.Duration) *Indexer {
+	if interval >= 0 {
+		i.assessmentInterval = interval
 	}
 	return i
 }
@@ -95,6 +105,10 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	if err != nil {
 		return Stats{}, fmt.Errorf("load fresh skills: %w", err)
 	}
+	storedHashes, err := i.store.SkillContentHashes(ctx)
+	if err != nil {
+		return Stats{}, fmt.Errorf("load stored skill hashes: %w", err)
+	}
 	stats := Stats{}
 	batchNumber := 0
 	batch := make([]Candidate, 0, indexBatchSize)
@@ -104,13 +118,13 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 		}
 		batchNumber++
 		i.logger.Info("indexing batch started", "batch", batchNumber, "candidates", len(batch), "batch_size_limit", indexBatchSize)
-		batchStats, err := i.indexBatch(ctx, batch, freshIDs, cutoff)
+		batchStats, err := i.indexBatch(ctx, batch, freshIDs, storedHashes, cutoff)
 		stats.add(batchStats)
 		for position := range batch {
 			batch[position] = Candidate{}
 		}
 		batch = batch[:0]
-		i.logger.Info("indexing batch complete", "batch", batchNumber, "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed)
+		i.logger.Info("indexing batch complete", "batch", batchNumber, "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "skipped_unchanged", stats.SkippedUnchanged, "failed", stats.Failed)
 		return err
 	}
 	yield := func(candidate Candidate) error {
@@ -143,7 +157,7 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	if err := flush(); err != nil {
 		return stats, err
 	}
-	i.logger.Info("skill discovery complete", "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed, "freshness_cutoff", cutoff, "batches", batchNumber)
+	i.logger.Info("skill discovery complete", "discovered", stats.Discovered, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "skipped_unchanged", stats.SkippedUnchanged, "failed", stats.Failed, "freshness_cutoff", cutoff, "batches", batchNumber)
 	return stats, nil
 }
 
@@ -153,10 +167,11 @@ func (stats *Stats) add(batch Stats) {
 	stats.SkippedWeak += batch.SkippedWeak
 	stats.SkippedStars += batch.SkippedStars
 	stats.SkippedFresh += batch.SkippedFresh
+	stats.SkippedUnchanged += batch.SkippedUnchanged
 	stats.Failed += batch.Failed
 }
 
-func (i *Indexer) indexBatch(ctx context.Context, candidates []Candidate, freshIDs map[string]struct{}, cutoff time.Time) (Stats, error) {
+func (i *Indexer) indexBatch(ctx context.Context, candidates []Candidate, freshIDs map[string]struct{}, storedHashes map[string]string, cutoff time.Time) (Stats, error) {
 	stats := Stats{Discovered: len(candidates)}
 	eligible := make([]Candidate, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -171,10 +186,15 @@ func (i *Indexer) indexBatch(ctx context.Context, candidates []Candidate, freshI
 			i.logger.Debug("skill skipped", "skill_id", candidate.ID, "reason", "stars", "stars", candidate.Stars)
 			continue
 		}
+		if storedHash, exists := storedHashes[candidate.ID]; exists && storedHash == hashFiles(candidate.Files) {
+			stats.SkippedUnchanged++
+			i.logger.Debug("skill skipped", "skill_id", candidate.ID, "reason", "unchanged")
+			continue
+		}
 		eligible = append(eligible, candidate)
 	}
 	if len(eligible) == 0 {
-		i.logger.Info("indexing progress", "processed", len(candidates), "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed)
+		i.logger.Info("indexing progress", "processed", len(candidates), "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "skipped_unchanged", stats.SkippedUnchanged, "failed", stats.Failed)
 		return stats, nil
 	}
 	i.logger.Info("skill auditing batch started", "eligible", len(eligible), "concurrency", min(i.concurrency, len(eligible)))
@@ -206,7 +226,7 @@ func (i *Indexer) indexBatch(ctx context.Context, candidates []Candidate, freshI
 		close(results)
 	}()
 
-	processed := stats.SkippedStars + stats.SkippedFresh
+	processed := stats.SkippedStars + stats.SkippedFresh + stats.SkippedUnchanged
 	var runErr error
 	for result := range results {
 		processed++
@@ -223,7 +243,7 @@ func (i *Indexer) indexBatch(ctx context.Context, candidates []Candidate, freshI
 			cancel()
 		}
 		if processed%indexBatchSize == 0 || processed == len(candidates) {
-			i.logger.Info("indexing progress", "processed", processed, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "failed", stats.Failed)
+			i.logger.Info("indexing progress", "processed", processed, "stored", stats.Stored, "skipped_weak", stats.SkippedWeak, "skipped_stars", stats.SkippedStars, "skipped_fresh", stats.SkippedFresh, "skipped_unchanged", stats.SkippedUnchanged, "failed", stats.Failed)
 		}
 	}
 	if runErr != nil {
@@ -316,6 +336,9 @@ func primarySkillContents(files []model.File) (string, bool) {
 
 func (i *Indexer) auditWithContextRetry(ctx context.Context, skillID, contents string) (audit.Result, error) {
 	for attempt := 1; ; attempt++ {
+		if err := i.waitForAssessmentSlot(ctx); err != nil {
+			return audit.Result{}, err
+		}
 		result, err := i.auditor.Audit(ctx, contents)
 		if err == nil {
 			return result, nil
@@ -335,6 +358,22 @@ func (i *Indexer) auditWithContextRetry(ctx context.Context, skillID, contents s
 		case <-timer.C:
 		}
 	}
+}
+
+func (i *Indexer) waitForAssessmentSlot(ctx context.Context) error {
+	i.assessmentGate.Lock()
+	defer i.assessmentGate.Unlock()
+	if delay := time.Until(i.lastAssessmentStart.Add(i.assessmentInterval)); delay > 0 {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	i.lastAssessmentStart = time.Now()
+	return nil
 }
 
 type indexStatus uint8
@@ -375,10 +414,8 @@ func (i *Indexer) indexCandidate(ctx context.Context, candidate Candidate) index
 			return indexResult{status: indexWeak}
 		}
 	}
-	filesJSON, _ := json.Marshal(candidate.Files)
-	sum := sha256.Sum256(filesJSON)
 	now := i.now().UTC()
-	skill := model.Skill{ID: candidate.ID, Source: candidate.Source, Slug: candidate.Slug, Name: candidate.Name, Description: candidate.Description, Stars: candidate.Stars, Installs: candidate.Stars, SourceType: "github", InstallURL: "https://github.com/" + candidate.Source, URL: i.publicBaseURL + "/" + candidate.ID, SecurityScore: result.Score, QualityScore: result.QualityScore, LLMChecked: llmChecked, Official: candidate.Official, Hash: hex.EncodeToString(sum[:]), Files: candidate.Files, UpdatedAt: now, Audit: model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: result.Status, Summary: result.Summary, RiskLevel: result.RiskLevel, Categories: result.Categories, AuditedAt: now}}
+	skill := model.Skill{ID: candidate.ID, Source: candidate.Source, Slug: candidate.Slug, Name: candidate.Name, Description: candidate.Description, Stars: candidate.Stars, Installs: candidate.Stars, SourceType: "github", InstallURL: "https://github.com/" + candidate.Source, URL: i.publicBaseURL + "/" + candidate.ID, SecurityScore: result.Score, QualityScore: result.QualityScore, LLMChecked: llmChecked, Official: candidate.Official, Hash: hashFiles(candidate.Files), Files: candidate.Files, UpdatedAt: now, Audit: model.Audit{Provider: "ExitMesh AI", Slug: "exitmesh-ai", Status: result.Status, Summary: result.Summary, RiskLevel: result.RiskLevel, Categories: result.Categories, AuditedAt: now}}
 	if err := i.store.UpsertSkill(ctx, skill); err != nil {
 		if errors.Is(err, model.ErrInvalidSkillContents) {
 			i.logger.Warn("skill storage skipped", "skill_id", candidate.ID, "reason", "invalid_contents", "error", err)
@@ -388,4 +425,10 @@ func (i *Indexer) indexCandidate(ctx context.Context, candidate Candidate) index
 	}
 	i.logger.Debug("skill indexed", "skill_id", candidate.ID, "security_score", result.Score, "quality_score", result.QualityScore, "risk_level", result.RiskLevel, "official", candidate.Official, "files", len(candidate.Files))
 	return indexResult{status: indexStored}
+}
+
+func hashFiles(files []model.File) string {
+	filesJSON, _ := json.Marshal(files)
+	sum := sha256.Sum256(filesJSON)
+	return hex.EncodeToString(sum[:])
 }

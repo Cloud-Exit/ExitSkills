@@ -5,7 +5,7 @@ ExitSkills is free and open-source software that discovers public GitHub reposit
 ## What it does
 
 - Enumerates every repository listed in the live skills.sh official catalog, then searches additional star-ranked public repositories whose README mentions `SKILL.md` or `SKILLS.md`. It recursively finds those exact filenames at any depth and supplements both passes with exact filename code search. Repositories with 10 stars or fewer are rejected before their skill content is downloaded.
-- Skips GitHub content downloads, AI assessments, and database writes for stored skills updated less than 24 hours ago; skills exactly 24 hours old are eligible again.
+- Skips GitHub content downloads, AI assessments, and database writes for stored skills updated less than seven days ago; skills exactly seven days old are eligible for a change check. Stale skills whose SHA-256 content hash is unchanged are not assessed or written.
 - Uses the live [skills.sh official catalog](https://www.skills.sh/official) both to enumerate official repositories and to categorize their creators; unofficial skills have identical indexing eligibility.
 - Stores skill metadata, file snapshots, SHA-256 content hashes, audit results, security scores, and quality scores in PostgreSQL or SQLite.
 - Removes an existing skill when a later assessment scores either security or quality below 5/10. Quality checks reject placeholder, spammy, incoherent, misleading, incomplete, or non-actionable skills.
@@ -64,13 +64,13 @@ Override the local path explicitly when needed:
 make LOCAL_DATABASE_URL=sqlite://.local/alternate.db run
 ```
 
-The `run` target also forces `INDEX_ON_START=true`: after startup it immediately refreshes the skills catalog, then continues refreshing at `INDEX_INTERVAL` (24 hours by default). This override applies only to `make run`.
+The `run` target also forces `INDEX_ON_START=true`: after startup it immediately refreshes the skills catalog, then continues refreshing at `INDEX_INTERVAL` (seven days by default). This override applies only to `make run`.
 
 Indexing uses bounded batches: discovery produces at most 10 candidates, audits and stores that batch, releases its contents, and only then continues. Boot-time LLM reconciliation likewise reads 10 compact records at a time rather than loading the entire unchecked catalog. Supporting files are capped at 4 MiB per skill; binary, invalid UTF-8, and NUL-containing files are rejected before persistence. An invalid candidate is counted as failed without aborting later batches. The container image and Compose deployment default `GOMEMLIMIT` to `384MiB`; the Helm chart exposes the same default as `config.goMemoryLimit`, leaving runtime and HTTP-serving headroom beneath its default 512 MiB container limit. Keep this setting below the container memory limit when overriding resources.
 
 Each refresh logs `indexing started` before any GitHub or AI work, with `trigger=startup` or `trigger=schedule`. The matching completion or failure log includes the same trigger and elapsed duration.
 
-At the default `LOG_LEVEL=info`, indexing logs official owner and repository counts, official repository metadata/tree progress, ranked and code-search page progress, each 10-candidate audit/store batch, a 30-second heartbeat while a page is still being processed, fresh-skill skips, and cumulative stored/rejected/failed totals. Boot-time reconciliation also logs each 10-skill batch plus the start and outcome (`passed`, `rejected`, or `failed`) of every stored-skill LLM assessment, including its skill ID, position, total, scores when available, and duration. A canceled or timed-out AI request is logged as retrying and leaves the skill unchecked instead of deleting it; retries continue while the service context is active. Candidate downloads and AI assessments run with bounded concurrency (`INDEX_CONCURRENCY=8` by default). Set `LOG_LEVEL=debug` in `.env` to add per-skill discovery, security score, quality score, indexing, and skip-reason logs. Skill contents and credentials are never logged.
+At the default `LOG_LEVEL=info`, indexing logs official owner and repository counts, official repository metadata/tree progress, ranked and code-search page progress, each 10-candidate audit/store batch, a 30-second heartbeat while a page is still being processed, fresh and unchanged skips, and cumulative stored/rejected/failed totals. Boot-time reconciliation also logs each 10-skill batch plus the start and outcome (`passed`, `rejected`, or `failed`) of every stored-skill LLM assessment, including its skill ID, position, total, scores when available, and duration. A canceled or timed-out AI request is logged as retrying and leaves the skill unchecked instead of deleting it; retries continue while the service context is active. GitHub candidate downloads use bounded concurrency (`INDEX_CONCURRENCY=2` by default). AI assessments are serialized and their start times are separated by `AI_AUDIT_INTERVAL` (5 seconds by default), including boot reconciliation and retries. Set `LOG_LEVEL=debug` in `.env` to add per-skill discovery, security score, quality score, indexing, and skip-reason logs. Skill contents and credentials are never logged.
 
 ```sh
 LOG_LEVEL=debug make run
@@ -115,9 +115,10 @@ SQLite database files are created with owner-only (`0600`) permissions.
 | `PUBLIC_BASE_URL` | no | `https://skills.exitmesh.com` | URL included in skill responses |
 | `LISTEN_ADDRESS` | no | `:8080` | HTTP listen address |
 | `LOG_LEVEL` | no | `info` | Structured log verbosity: `debug`, `info`, `warn`, or `error` |
-| `INDEX_INTERVAL` | no | `24h` | Duration between complete indexing runs |
+| `INDEX_INTERVAL` | no | `168h` | Duration between complete indexing runs |
 | `INDEX_ON_START` | no | `true` | Run indexing immediately after startup |
-| `INDEX_CONCURRENCY` | no | `8` | Concurrent GitHub candidate downloads and AI assessments; range 1–32 |
+| `INDEX_CONCURRENCY` | no | `2` | Concurrent GitHub candidate downloads; range 1–32 |
+| `AI_AUDIT_INTERVAL` | no | `5s` | Minimum time between the starts of serialized AI assessments |
 | `RATE_LIMIT_REQUESTS` | no | `600` | Requests allowed per key and window |
 | `RATE_LIMIT_WINDOW` | no | `1m` | Rate-limit window |
 | `REQUEST_TIMEOUT` | no | `30s` | GitHub, skills.sh, and AI HTTP timeout |
