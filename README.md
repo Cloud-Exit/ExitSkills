@@ -70,7 +70,7 @@ Indexing uses bounded batches: discovery produces at most 10 candidates, audits 
 
 Each refresh logs `indexing started` before any GitHub or AI work, with `trigger=startup` or `trigger=schedule`. The matching completion or failure log includes the same trigger and elapsed duration.
 
-At the default `LOG_LEVEL=info`, indexing logs official owner and repository counts, official repository metadata/tree progress, ranked and code-search page progress, each 10-candidate audit/store batch, a 30-second heartbeat while a page is still being processed, fresh and unchanged skips, and cumulative stored/rejected/failed totals. Boot-time reconciliation also logs each 10-skill batch plus the start and outcome (`passed`, `rejected`, or `failed`) of every stored-skill LLM assessment, including its skill ID, position, total, scores when available, and duration. A canceled or timed-out AI request is logged as retrying and leaves the skill unchecked instead of deleting it; retries continue while the service context is active. GitHub candidate downloads use bounded concurrency (`INDEX_CONCURRENCY=2` by default). AI assessments are serialized and their start times are separated by `AI_AUDIT_INTERVAL` (5 seconds by default), including boot reconciliation and retries. Set `LOG_LEVEL=debug` in `.env` to add per-skill discovery, security score, quality score, indexing, and skip-reason logs. Skill contents and credentials are never logged.
+At the default `LOG_LEVEL=info`, indexing logs official owner and repository counts, official repository metadata/tree progress, ranked and code-search page progress, each non-empty 10-candidate audit/store batch, a 30-second heartbeat while a page is still being processed, fresh and unchanged skips, and cumulative stored/rejected/failed totals. Fresh skills are discarded during discovery instead of being emitted as thousands of no-op batches. Stored-skill reconciliation logs each 10-skill batch plus the start and outcome (`passed`, `rejected`, `deferred`, or `failed`) of every assessment, including its skill ID, position, total, scores when available, and duration. Any AI request or response error is attempted only once per indexing run: the run stops, stored data is left untouched, and the scheduler waits until the next interval. GitHub candidate downloads use bounded concurrency (`INDEX_CONCURRENCY=2` by default). AI assessments have their own 10-minute request timeout, are serialized, and have an `AI_AUDIT_INTERVAL` cooldown after each completed request (1 minute by default). Set `LOG_LEVEL=debug` in `.env` to add per-skill discovery, security score, quality score, indexing, and skip-reason logs. Skill contents and credentials are never logged.
 
 ```sh
 LOG_LEVEL=debug make run
@@ -82,7 +82,7 @@ For convenience, `make run` and `make admin` accept an arbitrary local `ENCRYPTI
 
 Database migrations run automatically on service and admin startup for both backends.
 
-With AI configured, the HTTP listener starts before boot reconciliation so health checks and already-approved catalog entries remain available throughout indexing. Catalog list, search, detail, curated, and audit queries filter out every row whose `llmChecked` flag is false. Boot reconciliation processes those unchecked rows before any GitHub discovery: explicit passes become visible, rejections are removed, and interrupted requests remain hidden while retrying. This includes rows created by older versions and rows collected while AI was disabled. With AI disabled, this boot phase is skipped and unchecked skills remain publishable.
+With AI configured, the HTTP listener starts before startup indexing so health checks and already-approved catalog entries remain available throughout indexing. When `INDEX_ON_START=true`, stored unchecked rows are reconciled before any GitHub discovery: explicit passes become visible, rejections are removed, and interrupted requests remain hidden for the next scheduled run. Catalog list, search, detail, curated, and audit queries filter out every row whose `llmChecked` flag is false. This includes rows created by older versions and rows collected while AI was disabled. With AI disabled, reconciliation is skipped and unchecked skills remain publishable.
 
 ## Database backends
 
@@ -115,13 +115,14 @@ SQLite database files are created with owner-only (`0600`) permissions.
 | `PUBLIC_BASE_URL` | no | `https://skills.exitmesh.com` | URL included in skill responses |
 | `LISTEN_ADDRESS` | no | `:8080` | HTTP listen address |
 | `LOG_LEVEL` | no | `info` | Structured log verbosity: `debug`, `info`, `warn`, or `error` |
-| `INDEX_INTERVAL` | no | `168h` | Duration between complete indexing runs |
+| `INDEX_INTERVAL` | no | `168h` | Duration between complete indexing runs; values below seven days are clamped to seven days |
 | `INDEX_ON_START` | no | `true` | Run indexing immediately after startup |
 | `INDEX_CONCURRENCY` | no | `2` | Concurrent GitHub candidate downloads; range 1–32 |
-| `AI_AUDIT_INTERVAL` | no | `5s` | Minimum time between the starts of serialized AI assessments |
+| `AI_AUDIT_INTERVAL` | no | `1m` | Cooldown after each serialized AI assessment completes |
+| `AI_REQUEST_TIMEOUT` | no | `10m` | Per-assessment timeout; independent of GitHub `REQUEST_TIMEOUT` |
 | `RATE_LIMIT_REQUESTS` | no | `600` | Requests allowed per key and window |
 | `RATE_LIMIT_WINDOW` | no | `1m` | Rate-limit window |
-| `REQUEST_TIMEOUT` | no | `30s` | GitHub, skills.sh, and AI HTTP timeout |
+| `REQUEST_TIMEOUT` | no | `30s` | GitHub and skills.sh HTTP timeout |
 | `GITHUB_API_BASE_URL` | no | `https://api.github.com` | HTTPS GitHub API base, overridable for tests/enterprise |
 | `OFFICIAL_SKILLS_URL` | no | `https://www.skills.sh/official` | HTTPS official-creator catalog |
 

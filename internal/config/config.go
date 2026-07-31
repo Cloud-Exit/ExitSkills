@@ -24,6 +24,7 @@ type Config struct {
 	AIAPIKey           string
 	AIModel            string
 	AIEnabled          bool
+	AIRequestTimeout   time.Duration
 	ListenAddress      string
 	PublicBaseURL      string
 	IndexInterval      time.Duration
@@ -175,6 +176,9 @@ func loadCommon() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if indexInterval < 7*24*time.Hour {
+		indexInterval = 7 * 24 * time.Hour
+	}
 	rateWindow, err := durationEnv("RATE_LIMIT_WINDOW", time.Minute)
 	if err != nil {
 		return Config{}, err
@@ -201,7 +205,11 @@ func loadCommon() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	aiAuditInterval, err := durationEnv("AI_AUDIT_INTERVAL", 5*time.Second)
+	aiAuditInterval, err := durationEnv("AI_AUDIT_INTERVAL", time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	aiRequestTimeout, err := durationEnv("AI_REQUEST_TIMEOUT", 10*time.Minute)
 	if err != nil {
 		return Config{}, err
 	}
@@ -214,7 +222,7 @@ func loadCommon() (Config, error) {
 
 	return Config{
 		DatabaseURL: os.Getenv("DATABASE_URL"), GitHubToken: os.Getenv("GITHUB_TOKEN"), MasterToken: strings.TrimSpace(os.Getenv("MASTER_TOKEN")), EncryptionKey: key,
-		AIBaseURL: strings.TrimRight(os.Getenv("AI_BASE_URL"), "/"), AIAPIKey: os.Getenv("AI_API_KEY"), AIModel: os.Getenv("AI_MODEL"),
+		AIBaseURL: strings.TrimRight(os.Getenv("AI_BASE_URL"), "/"), AIAPIKey: os.Getenv("AI_API_KEY"), AIModel: os.Getenv("AI_MODEL"), AIRequestTimeout: aiRequestTimeout,
 		ListenAddress: envOr("LISTEN_ADDRESS", ":8080"), PublicBaseURL: strings.TrimRight(envOr("PUBLIC_BASE_URL", "https://skills.exitmesh.com"), "/"),
 		IndexInterval: indexInterval, IndexConcurrency: indexConcurrency, IndexOnStart: indexOnStart, AIAuditInterval: aiAuditInterval, RateLimit: rateLimit, RateWindow: rateWindow,
 		GitHubAPIBaseURL: strings.TrimRight(envOr("GITHUB_API_BASE_URL", "https://api.github.com"), "/"),

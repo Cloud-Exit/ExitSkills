@@ -51,7 +51,8 @@ config:
   indexInterval: "168h"
   indexOnStart: true
   indexConcurrency: 2
-  aiAuditInterval: "5s"
+  aiAuditInterval: "1m"
+  aiRequestTimeout: "10m"
   logLevel: "info"
   rateLimitRequests: 600
   rateLimitWindow: "1m"

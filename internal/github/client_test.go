@@ -309,8 +309,8 @@ func TestDiscoverSkippingDoesNotDownloadFreshSkill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].ID != "acme/tool/demo" || !items[0].Fresh {
-		t.Fatalf("unexpected items: %+v", items)
+	if len(items) != 0 {
+		t.Fatalf("fresh skills were emitted for indexing: %+v", items)
 	}
 	if contentRequests.Load() != 0 {
 		t.Fatalf("content requests = %d, want 0", contentRequests.Load())

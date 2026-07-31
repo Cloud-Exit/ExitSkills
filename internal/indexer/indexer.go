@@ -49,23 +49,24 @@ type Stats struct {
 	Discovered, Stored, SkippedWeak, SkippedStars, SkippedFresh, SkippedUnchanged, Failed int
 }
 
+var ErrAssessmentDeferred = errors.New("AI assessment deferred")
+
 const (
 	skillFreshness = 7 * 24 * time.Hour
 	indexBatchSize = 10
 )
 
 type Indexer struct {
-	source               Source
-	auditor              Auditor
-	store                Store
-	now                  func() time.Time
-	publicBaseURL        string
-	logger               *slog.Logger
-	concurrency          int
-	assessmentRetryDelay time.Duration
-	assessmentInterval   time.Duration
-	assessmentGate       sync.Mutex
-	lastAssessmentStart  time.Time
+	source              Source
+	auditor             Auditor
+	store               Store
+	now                 func() time.Time
+	publicBaseURL       string
+	logger              *slog.Logger
+	concurrency         int
+	assessmentInterval  time.Duration
+	assessmentGate      sync.Mutex
+	nextAssessmentStart time.Time
 }
 
 func New(source Source, auditor Auditor, store Store, now func() time.Time) *Indexer {
@@ -73,7 +74,7 @@ func New(source Source, auditor Auditor, store Store, now func() time.Time) *Ind
 		now = time.Now
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &Indexer{source: source, auditor: auditor, store: store, now: now, publicBaseURL: "https://skills.exitmesh.com", logger: logger, concurrency: 8, assessmentRetryDelay: time.Second}
+	return &Indexer{source: source, auditor: auditor, store: store, now: now, publicBaseURL: "https://skills.exitmesh.com", logger: logger, concurrency: 8}
 }
 func (i *Indexer) WithPublicBaseURL(url string) *Indexer { i.publicBaseURL = url; return i }
 func (i *Indexer) WithConcurrency(concurrency int) *Indexer {
@@ -289,18 +290,14 @@ func (i *Indexer) Reconcile(ctx context.Context) error {
 				processed++
 				continue
 			}
-			result, err := i.auditWithContextRetry(ctx, skill.ID, skill.Contents)
+			result, err := i.auditWithCooldown(ctx, skill.Contents)
 			if err != nil {
 				if ctx.Err() != nil {
 					i.logger.Info("stored skill LLM assessment interrupted", "skill_id", skill.ID, "position", position, "total", total, "reason", ctx.Err(), "duration_ms", time.Since(assessmentStarted).Milliseconds())
 					return ctx.Err()
 				}
-				i.logger.Warn("stored skill LLM assessment failed", "skill_id", skill.ID, "position", position, "total", total, "error", err, "duration_ms", time.Since(assessmentStarted).Milliseconds())
-				if err := i.store.DeleteSkill(ctx, skill.ID); err != nil {
-					return fmt.Errorf("remove failed stored skill %s: %w", skill.ID, err)
-				}
-				processed++
-				continue
+				i.logger.Warn("stored skill LLM assessment deferred", "skill_id", skill.ID, "position", position, "total", total, "error", err, "duration_ms", time.Since(assessmentStarted).Milliseconds())
+				return err
 			}
 			if result.Status != "pass" || result.Score < 5 || result.QualityScore < 5 {
 				i.logger.Info("stored skill LLM assessment rejected", "skill_id", skill.ID, "position", position, "total", total, "status", result.Status, "security_score", result.Score, "quality_score", result.QualityScore, "risk_level", result.RiskLevel, "duration_ms", time.Since(assessmentStarted).Milliseconds())
@@ -334,36 +331,10 @@ func primarySkillContents(files []model.File) (string, bool) {
 	return "", false
 }
 
-func (i *Indexer) auditWithContextRetry(ctx context.Context, skillID, contents string) (audit.Result, error) {
-	for attempt := 1; ; attempt++ {
-		if err := i.waitForAssessmentSlot(ctx); err != nil {
-			return audit.Result{}, err
-		}
-		result, err := i.auditor.Audit(ctx, contents)
-		if err == nil {
-			return result, nil
-		}
-		if ctx.Err() != nil || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
-			return audit.Result{}, err
-		}
-		i.logger.Warn("skill LLM assessment request interrupted; retrying", "skill_id", skillID, "attempt", attempt, "error", err, "retry_in", i.assessmentRetryDelay)
-		if i.assessmentRetryDelay <= 0 {
-			continue
-		}
-		timer := time.NewTimer(i.assessmentRetryDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return audit.Result{}, ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-func (i *Indexer) waitForAssessmentSlot(ctx context.Context) error {
+func (i *Indexer) auditWithCooldown(ctx context.Context, contents string) (audit.Result, error) {
 	i.assessmentGate.Lock()
 	defer i.assessmentGate.Unlock()
-	if delay := time.Until(i.lastAssessmentStart.Add(i.assessmentInterval)); delay > 0 {
+	if delay := time.Until(i.nextAssessmentStart); delay > 0 {
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -372,8 +343,12 @@ func (i *Indexer) waitForAssessmentSlot(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
-	i.lastAssessmentStart = time.Now()
-	return nil
+	result, err := i.auditor.Audit(ctx, contents)
+	i.nextAssessmentStart = time.Now().Add(i.assessmentInterval)
+	if err != nil && ctx.Err() == nil {
+		return audit.Result{}, fmt.Errorf("%w: %v", ErrAssessmentDeferred, err)
+	}
+	return result, err
 }
 
 type indexStatus uint8
@@ -395,16 +370,13 @@ func (i *Indexer) indexCandidate(ctx context.Context, candidate Candidate) index
 	llmChecked := i.auditor != nil
 	if llmChecked {
 		var err error
-		result, err = i.auditWithContextRetry(ctx, candidate.ID, candidate.Contents)
+		result, err = i.auditWithCooldown(ctx, candidate.Contents)
 		if err != nil {
 			if ctx.Err() != nil {
 				return indexResult{err: ctx.Err()}
 			}
-			if err := i.store.DeleteSkill(ctx, candidate.ID); err != nil {
-				return indexResult{err: fmt.Errorf("remove unaudited skill %s: %w", candidate.ID, err)}
-			}
-			i.logger.Warn("skill audit failed", "skill_id", candidate.ID, "error", err)
-			return indexResult{status: indexFailed}
+			i.logger.Warn("skill audit deferred; indexing run will stop without changing stored data", "skill_id", candidate.ID, "error", err)
+			return indexResult{status: indexFailed, err: err}
 		}
 		if result.Status != "pass" || result.Score < 5 || result.QualityScore < 5 {
 			if err := i.store.DeleteSkill(ctx, candidate.ID); err != nil {

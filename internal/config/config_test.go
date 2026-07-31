@@ -36,11 +36,26 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.IndexConcurrency != 2 {
 		t.Fatalf("IndexConcurrency = %d, want 2", cfg.IndexConcurrency)
 	}
-	if cfg.AIAuditInterval != 5*time.Second {
-		t.Fatalf("AIAuditInterval = %v, want 5s", cfg.AIAuditInterval)
+	if cfg.AIAuditInterval != time.Minute {
+		t.Fatalf("AIAuditInterval = %v, want 1m", cfg.AIAuditInterval)
+	}
+	if cfg.AIRequestTimeout != 10*time.Minute {
+		t.Fatalf("AIRequestTimeout = %v, want 10m", cfg.AIRequestTimeout)
 	}
 	if cfg.MasterToken != testMasterToken {
 		t.Fatalf("MasterToken = %q, want configured value", cfg.MasterToken)
+	}
+}
+
+func TestLoadClampsIndexIntervalToSevenDays(t *testing.T) {
+	setValidConfigEnv(t)
+	t.Setenv("INDEX_INTERVAL", "24h")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IndexInterval != 7*24*time.Hour {
+		t.Fatalf("IndexInterval = %v, want seven-day minimum", cfg.IndexInterval)
 	}
 }
 
@@ -309,6 +324,7 @@ func clearOptionalConfigEnv(t *testing.T) {
 	for _, name := range []string{
 		"AI_API_KEY",
 		"AI_AUDIT_INTERVAL",
+		"AI_REQUEST_TIMEOUT",
 		"EXITMESH_LOCAL_DEVELOPMENT",
 		"GITHUB_API_BASE_URL",
 		"GITHUB_CLIENT_ID",

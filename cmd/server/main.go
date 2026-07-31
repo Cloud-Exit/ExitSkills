@@ -66,7 +66,7 @@ func main() {
 	source := githubclient.NewClientWithAuthenticator(cfg.GitHubAPIBaseURL, githubAuth, cfg.OfficialURL, httpClient).WithLogger(logger).WithConcurrency(cfg.IndexConcurrency)
 	var auditor indexer.Auditor
 	if cfg.AIEnabled {
-		auditor = audit.NewClient(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, httpClient)
+		auditor = audit.NewClient(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, newOutboundHTTPClient(cfg.AIRequestTimeout))
 	}
 	worker := indexer.New(source, auditor, db, time.Now).WithPublicBaseURL(cfg.PublicBaseURL).WithLogger(logger).WithConcurrency(1).WithAssessmentInterval(cfg.AIAuditInterval)
 	handler := httpapi.NewHandler(db, auth.NewVerifier(keys, db), httpapi.NewLimiter(cfg.RateLimit, cfg.RateWindow), httpapi.WithAdmin(cfg.MasterToken, keys, db), httpapi.WithLLMEnforcement(cfg.AIEnabled))
@@ -77,7 +77,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer server.Close()
-	logger.Info("server listening", "address", cfg.ListenAddress, "version", version, "log_level", cfg.LogLevel, "index_concurrency", cfg.IndexConcurrency, "ai_audit_interval", cfg.AIAuditInterval)
+	logger.Info("server listening", "address", cfg.ListenAddress, "version", version, "log_level", cfg.LogLevel, "index_interval", cfg.IndexInterval, "index_concurrency", cfg.IndexConcurrency, "ai_audit_interval", cfg.AIAuditInterval, "ai_request_timeout", cfg.AIRequestTimeout)
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server failed", "error", err)
@@ -85,18 +85,7 @@ func main() {
 		}
 	}()
 
-	if cfg.AIEnabled {
-		logger.Info("boot-time stored skill LLM assessment started")
-		if err := worker.Reconcile(ctx); err != nil {
-			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-				logger.Info("boot-time stored skill LLM assessment interrupted", "reason", ctx.Err())
-				return
-			}
-			logger.Error("boot-time stored skill LLM assessment failed", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("boot-time stored skill LLM assessment complete")
-	} else {
+	if !cfg.AIEnabled {
 		logger.Warn("LLM assessment disabled", "reason", "AI_BASE_URL and AI_MODEL are not configured")
 	}
 	go scheduler.Run(ctx, cfg.IndexInterval, cfg.IndexOnStart, worker, logger)

@@ -189,7 +189,7 @@ func (c *Client) DiscoverStream(ctx context.Context, freshIDs map[string]struct{
 					c.logger.Debug("search result skipped", "repository", item.Repository.FullName, "path", item.Path, "reason", "filename_mismatch", "expected", filename)
 					continue
 				}
-				folder, slug, id, owner := candidateIdentity(item)
+				folder, _, id, _ := candidateIdentity(item)
 				key := id
 				if seen[key] {
 					duplicates++
@@ -198,9 +198,6 @@ func (c *Client) DiscoverStream(ctx context.Context, freshIDs map[string]struct{
 				seen[key] = true
 				if _, fresh := freshIDs[id]; fresh {
 					freshSkipped++
-					if err := emit(indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true}); err != nil {
-						return err
-					}
 					c.logger.Debug("skill skipped before content download", "skill_id", id, "path", folder, "reason", "fresh")
 					continue
 				}
@@ -247,7 +244,7 @@ func (c *Client) discoverOfficialRepositories(ctx context.Context, names []strin
 	pageItems := make([]searchItem, 0, len(items))
 	candidates := 0
 	for _, item := range items {
-		folder, slug, id, owner := candidateIdentity(item)
+		folder, _, id, _ := candidateIdentity(item)
 		if seen[id] {
 			duplicates++
 			continue
@@ -255,10 +252,6 @@ func (c *Client) discoverOfficialRepositories(ctx context.Context, names []strin
 		seen[id] = true
 		if _, fresh := freshIDs[id]; fresh {
 			freshSkipped++
-			if err := yield(indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true}); err != nil {
-				return candidates, duplicates, metadataFailures + treeFailures, freshSkipped, err
-			}
-			candidates++
 			c.logger.Debug("skill skipped before content download", "skill_id", id, "path", folder, "reason", "fresh")
 			continue
 		}
@@ -357,7 +350,7 @@ func (c *Client) discoverPopularRepositories(ctx context.Context, freshIDs map[s
 		contentFailures += treeFailures
 		pageItems := make([]searchItem, 0, len(items))
 		for _, item := range items {
-			folder, slug, id, owner := candidateIdentity(item)
+			folder, _, id, _ := candidateIdentity(item)
 			if seen[id] {
 				duplicates++
 				continue
@@ -365,10 +358,6 @@ func (c *Client) discoverPopularRepositories(ctx context.Context, freshIDs map[s
 			seen[id] = true
 			if _, fresh := freshIDs[id]; fresh {
 				freshSkipped++
-				if err := yield(indexer.Candidate{ID: id, Source: item.Repository.FullName, Slug: slug, Stars: item.Repository.Stars, Official: officialOwners[strings.ToLower(owner)], Fresh: true}); err != nil {
-					return candidates, duplicates, contentFailures, freshSkipped, err
-				}
-				candidates++
 				c.logger.Debug("skill skipped before content download", "skill_id", id, "path", folder, "reason", "fresh")
 				continue
 			}

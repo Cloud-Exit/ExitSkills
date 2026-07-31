@@ -81,7 +81,7 @@ type fakeStore struct {
 	upsertErrs map[string]error
 }
 
-func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
+func TestRunDefersWithoutMutationWhenAuditIsUnavailable(t *testing.T) {
 	source := fakeSource{candidates: []Candidate{{
 		ID: "org/stale/stale", Source: "org/stale", Slug: "stale", Name: "Stale", Stars: 20, Contents: "changed",
 	}}}
@@ -89,14 +89,14 @@ func TestRunFailsClosedWhenAuditIsUnavailable(t *testing.T) {
 	i := New(source, failingAuditor{}, store, time.Now)
 
 	stats, err := i.Run(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrAssessmentDeferred) {
+		t.Fatalf("Run() error = %v, want ErrAssessmentDeferred", err)
 	}
 	if stats.Failed != 1 || len(store.upserted) != 0 {
 		t.Fatalf("unexpected stats/store: %+v %+v", stats, store.upserted)
 	}
-	if len(store.deleted) != 1 || store.deleted[0] != "org/stale/stale" {
-		t.Fatalf("stale approval was not removed: %+v", store.deleted)
+	if len(store.deleted) != 0 {
+		t.Fatalf("unavailable AI caused stored data deletion: %+v", store.deleted)
 	}
 }
 
@@ -318,25 +318,24 @@ func TestPrimarySkillContentsRequiresCanonicalFilenameCase(t *testing.T) {
 	}
 }
 
-func TestReconcileRetriesCanceledAssessmentWithoutDeletingSkill(t *testing.T) {
+func TestReconcileDefersCanceledAssessmentWithoutRetryingOrDeletingSkill(t *testing.T) {
 	store := &fakeStore{unassessed: []model.Skill{{
 		ID: "org/repo/legacy", Source: "org/repo", Slug: "legacy", Name: "Legacy", Stars: 11,
 		Files: []model.File{{Path: "SKILL.md", Contents: "legacy contents"}},
 	}}}
 	auditor := &cancelOnceAuditor{}
-	index := New(fakeSource{}, auditor, store, time.Now)
-	index.assessmentRetryDelay = 0
-	if err := index.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
+	err := New(fakeSource{}, auditor, store, time.Now).Reconcile(context.Background())
+	if !errors.Is(err, ErrAssessmentDeferred) {
+		t.Fatalf("Reconcile() error = %v, want ErrAssessmentDeferred", err)
 	}
-	if auditor.calls.Load() != 2 {
-		t.Fatalf("assessment calls = %d, want 2", auditor.calls.Load())
+	if auditor.calls.Load() != 1 {
+		t.Fatalf("assessment calls = %d, want 1", auditor.calls.Load())
 	}
 	if len(store.deleted) != 0 {
 		t.Fatalf("canceled assessment deleted skills: %v", store.deleted)
 	}
-	if len(store.upserted) != 1 || !store.upserted[0].LLMChecked {
-		t.Fatalf("retried assessment was not stored as checked: %+v", store.upserted)
+	if len(store.upserted) != 0 {
+		t.Fatalf("deferred assessment was stored: %+v", store.upserted)
 	}
 }
 
@@ -377,6 +376,7 @@ type recordingAuditor struct {
 	mu    sync.Mutex
 	calls []string
 	times []time.Time
+	delay time.Duration
 }
 
 func (a *recordingAuditor) Audit(_ context.Context, contents string) (audit.Result, error) {
@@ -384,11 +384,14 @@ func (a *recordingAuditor) Audit(_ context.Context, contents string) (audit.Resu
 	a.calls = append(a.calls, contents)
 	a.times = append(a.times, time.Now())
 	a.mu.Unlock()
+	if a.delay > 0 {
+		time.Sleep(a.delay)
+	}
 	return audit.Result{Score: 8, QualityScore: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
 }
 
-func TestRunPacesAssessmentStarts(t *testing.T) {
-	auditor := &recordingAuditor{}
+func TestRunPacesAssessmentsAfterPreviousRequestCompletes(t *testing.T) {
+	auditor := &recordingAuditor{delay: 20 * time.Millisecond}
 	source := fakeSource{candidates: []Candidate{
 		{ID: "org/repo/one", Source: "org/repo", Slug: "one", Stars: 20, Contents: "one"},
 		{ID: "org/repo/two", Source: "org/repo", Slug: "two", Stars: 20, Contents: "two"},
@@ -399,8 +402,23 @@ func TestRunPacesAssessmentStarts(t *testing.T) {
 		Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(auditor.times) != 2 || auditor.times[1].Sub(auditor.times[0]) < 25*time.Millisecond {
+	if len(auditor.times) != 2 || auditor.times[1].Sub(auditor.times[0]) < 45*time.Millisecond {
 		t.Fatalf("assessment starts were not paced: %v", auditor.times)
+	}
+}
+
+func TestRunStopsAfterTimedOutAssessmentWithoutDeletingStoredSkill(t *testing.T) {
+	source := fakeSource{candidates: []Candidate{{
+		ID: "org/repo/changed", Source: "org/repo", Slug: "changed", Stars: 20,
+		Contents: "changed", Files: []model.File{{Path: "SKILL.md", Contents: "changed"}},
+	}}}
+	store := &fakeStore{hashes: map[string]string{"org/repo/changed": "old-hash"}}
+	stats, err := New(source, cancelingAuditor{}, store, time.Now).Run(context.Background())
+	if !errors.Is(err, ErrAssessmentDeferred) {
+		t.Fatalf("Run() error = %v, want ErrAssessmentDeferred", err)
+	}
+	if stats.Stored != 0 || len(store.deleted) != 0 || len(store.upserted) != 0 {
+		t.Fatalf("timed-out assessment mutated store: stats=%+v deleted=%v upserted=%v", stats, store.deleted, store.upserted)
 	}
 }
 
@@ -493,7 +511,7 @@ func (a *concurrentAuditor) Audit(context.Context, string) (audit.Result, error)
 	return audit.Result{Score: 8, QualityScore: 8, Status: "pass", Summary: "checked", RiskLevel: "LOW"}, nil
 }
 
-func TestRunAuditsEligibleSkillsConcurrently(t *testing.T) {
+func TestRunSerializesAuditsEvenWithConcurrentIndexing(t *testing.T) {
 	candidates := make([]Candidate, 4)
 	for position := range candidates {
 		id := fmt.Sprintf("org/repo/skill-%d", position)
@@ -508,8 +526,8 @@ func TestRunAuditsEligibleSkillsConcurrently(t *testing.T) {
 	if stats.Stored != len(candidates) {
 		t.Fatalf("Stored = %d, want %d", stats.Stored, len(candidates))
 	}
-	if auditor.max.Load() < 2 {
-		t.Fatalf("maximum concurrent audits = %d, want at least 2", auditor.max.Load())
+	if auditor.max.Load() != 1 {
+		t.Fatalf("maximum concurrent audits = %d, want 1", auditor.max.Load())
 	}
 }
 
