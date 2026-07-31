@@ -339,7 +339,7 @@ func (i *Indexer) auditWithCooldown(ctx context.Context, contents string) (audit
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return audit.Result{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
